@@ -14,6 +14,12 @@ class ClipboardStore: ObservableObject {
     
     private let fileManager = FileManager.default
     private let saveQueue = DispatchQueue(label: "com.clippie.save", qos: .utility)
+    private let fileTextSearchCacheQueue = DispatchQueue(
+        label: "com.clippie.file-text-search-cache",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+    private var fileTextSearchCache: [UUID: String] = [:]
     
     private var storageDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -85,6 +91,7 @@ class ClipboardStore: ObservableObject {
     
     private func performAdd(_ item: ClipboardItem) {
         print("[clippie] Store: Adding item, current count: \(items.count)")
+        invalidateCachedSearchText(for: item.id)
         
         // Insert at beginning (newest first)
         items.insert(item, at: 0)
@@ -102,6 +109,7 @@ class ClipboardStore: ObservableObject {
     
     func delete(_ item: ClipboardItem) {
         items.removeAll { $0.id == item.id }
+        invalidateCachedSearchText(for: item.id)
         deleteAssociatedFiles(for: item)
         
         let itemsToSave = items
@@ -145,6 +153,7 @@ class ClipboardStore: ObservableObject {
             deleteAssociatedFiles(for: item)
         }
         items.removeAll()
+        clearCachedSearchText()
         
         saveQueue.async { [weak self] in
             self?.saveHistoryToDisk([])
@@ -195,6 +204,40 @@ class ClipboardStore: ObservableObject {
             print("[clippie] Failed to load text file: \(error)")
             return item.textContent // Fallback to inline preview
         }
+    }
+
+    func matchesSearch(_ item: ClipboardItem, normalizedQuery: String) -> Bool {
+        guard !normalizedQuery.isEmpty else { return true }
+
+        switch item.type {
+        case .text:
+            if let inlineText = item.textContent,
+               Self.normalizeSearchText(inlineText).contains(normalizedQuery) {
+                return true
+            }
+
+            if item.isFileBacked,
+               let fullText = normalizedFullTextForSearch(for: item),
+               fullText.contains(normalizedQuery) {
+                return true
+            }
+        case .image:
+            if let ocrText = item.ocrText,
+               Self.normalizeSearchText(ocrText).contains(normalizedQuery) {
+                return true
+            }
+        }
+
+        if let sourceApp = item.sourceApp,
+           Self.normalizeSearchText(sourceApp).contains(normalizedQuery) {
+            return true
+        }
+
+        return false
+    }
+
+    static func normalizeSearchText(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
     
     /// Load a chunk of text content, reading only what's necessary
@@ -304,6 +347,7 @@ class ClipboardStore: ObservableObject {
             let data = try Data(contentsOf: historyFileURL)
             let loadedItems = try JSONDecoder().decode([ClipboardItem].self, from: data)
             let retentionResult = applyingHistoryRetention(to: loadedItems)
+            clearCachedSearchText()
             self.items = retentionResult.retained
             retentionResult.removed.forEach(deleteAssociatedFiles(for:))
             if !retentionResult.removed.isEmpty {
@@ -343,11 +387,58 @@ class ClipboardStore: ObservableObject {
         deleteTextFile(for: item)
     }
 
+    private func normalizedFullTextForSearch(for item: ClipboardItem) -> String? {
+        guard let filename = item.textFilename else {
+            return item.textContent.map(Self.normalizeSearchText)
+        }
+
+        if let cached = cachedSearchText(for: item.id) {
+            return cached
+        }
+
+        let url = textsDirectory.appendingPathComponent(filename)
+
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let normalizedText = Self.normalizeSearchText(text)
+            cacheSearchText(normalizedText, for: item.id)
+            return normalizedText
+        } catch {
+            print("[clippie] Failed to load text for search: \(error)")
+            return item.textContent.map(Self.normalizeSearchText)
+        }
+    }
+
+    private func cachedSearchText(for id: UUID) -> String? {
+        fileTextSearchCacheQueue.sync {
+            fileTextSearchCache[id]
+        }
+    }
+
+    private func cacheSearchText(_ text: String, for id: UUID) {
+        fileTextSearchCacheQueue.async(flags: .barrier) {
+            self.fileTextSearchCache[id] = text
+        }
+    }
+
+    private func invalidateCachedSearchText(for id: UUID) {
+        fileTextSearchCacheQueue.async(flags: .barrier) {
+            self.fileTextSearchCache.removeValue(forKey: id)
+        }
+    }
+
+    private func clearCachedSearchText() {
+        fileTextSearchCacheQueue.async(flags: .barrier) {
+            self.fileTextSearchCache.removeAll()
+        }
+    }
+
     private func applyHistoryRetention(persist: Bool = true) {
         let retentionResult = applyingHistoryRetention(to: items)
         guard retentionResult.removed.isEmpty == false else { return }
 
         retentionResult.removed.forEach(deleteAssociatedFiles(for:))
+        retentionResult.removed.forEach { invalidateCachedSearchText(for: $0.id) }
         items = retentionResult.retained
 
         guard persist else { return }

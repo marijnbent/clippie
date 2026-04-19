@@ -448,6 +448,7 @@ private struct QuickActionRow: View {
 /// Main content view - Split pane with list and detail
 struct HistoryContentView: View {
     private static let initialVisibleClipboardItemLimit = 50
+    private static let searchDebounceDelay: DispatchTimeInterval = .milliseconds(70)
 
     @ObservedObject var store: ClipboardStore
     @StateObject private var snippetStore = SnippetStore.shared
@@ -473,6 +474,8 @@ struct HistoryContentView: View {
     @State private var quickActionHomeSelection = 0
     @State private var quickActionMessage: String?
     @State private var quickActionError: String?
+    @State private var filteredClipboardItems: [ClipboardItem] = []
+    @State private var clipboardSearchRevision = 0
     
     
     // OCR state
@@ -481,21 +484,21 @@ struct HistoryContentView: View {
     // Track selection by ID so it survives list insertions
     @State private var selectedID: HistorySelectionID?
     
+    private var isSnippetSearch: Bool {
+        searchText.hasPrefix(":")
+    }
+
     private var filteredItems: [ClipboardItem] {
-        if searchText.isEmpty {
-            return Array(store.items.prefix(Self.initialVisibleClipboardItemLimit))
+        if isSnippetSearch {
+            return []
         }
 
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return Array(store.items.prefix(Self.initialVisibleClipboardItemLimit)) }
-
-        return store.items.filter { item in
-            itemMatchesSearch(item, query: query)
+        guard !query.isEmpty else {
+            return Array(store.items.prefix(Self.initialVisibleClipboardItemLimit))
         }
-    }
-    
-    private var isSnippetSearch: Bool {
-        searchText.hasPrefix(":")
+
+        return filteredClipboardItems
     }
     
     private var filteredSnippets: [Snippet] {
@@ -593,15 +596,19 @@ struct HistoryContentView: View {
                     
                     Divider()
                     
-                    // Split pane: List + Detail
-                    HSplitView {
-                        // Left: List
-                        listPane
-                            .frame(minWidth: 300, maxWidth: 340)
-                        
-                        // Right: Detail
-                        detailPane
-                            .frame(minWidth: 260)
+                    if filteredResults.isEmpty {
+                        emptyResultsPane
+                    } else {
+                        // Split pane: List + Detail
+                        HSplitView {
+                            // Left: List
+                            listPane
+                                .frame(minWidth: 300, maxWidth: 340)
+                            
+                            // Right: Detail
+                            detailPane
+                                .frame(minWidth: 260)
+                        }
                     }
                 }
             }
@@ -610,10 +617,14 @@ struct HistoryContentView: View {
             minWidth: isImagePreviewActive ? 720 : 580,
             minHeight: isImagePreviewActive ? 520 : 400
         )
+        .onAppear {
+            refreshFilteredItems()
+        }
         .onChange(of: searchText) { _ in
             resetQuickActionState()
             selectedIndex = 0
-            selectedID = filteredResults[safe: 0]?.selectionID
+            selectedID = nil
+            refreshFilteredItems()
         }
         .onChange(of: selectedIndex) { newIndex in
             selectedID = filteredResults[safe: newIndex]?.selectionID
@@ -622,7 +633,7 @@ struct HistoryContentView: View {
             resetQuickActionState()
         }
         .onChange(of: store.items) { _ in
-            syncSelection()
+            refreshFilteredItems()
         }
         .onChange(of: snippetStore.snippets) { _ in
             if isSnippetSearch {
@@ -634,6 +645,7 @@ struct HistoryContentView: View {
             searchText = ""
             selectedIndex = 0
             selectedID = store.items.first.map { HistorySelectionID.clipboard($0.id) }
+            refreshFilteredItems()
             // Delay needed for NSHostingView to have settled as key window
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 isSearchFocused = true
@@ -806,6 +818,21 @@ struct HistoryContentView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .background(chromeSurfaceFill)
+    }
+
+    private var emptyResultsPane: some View {
+        VStack(spacing: 6) {
+            Spacer()
+            Image(systemName: searchText.isEmpty ? "clipboard" : "magnifyingglass")
+                .font(.system(size: 20, weight: .light))
+                .foregroundColor(.secondary.opacity(0.3))
+            Text(emptyStateText)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary.opacity(0.5))
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(paneSurfaceFill)
     }
     
     private var listPane: some View {
@@ -1420,26 +1447,37 @@ struct HistoryContentView: View {
         return nil
     }
 
-    private func itemMatchesSearch(_ item: ClipboardItem, query: String) -> Bool {
-        switch item.type {
-        case .text:
-            let text = store.fullText(for: item) ?? item.textContent ?? ""
-            if text.localizedCaseInsensitiveContains(query) {
-                return true
-            }
-        case .image:
-            if let ocrText = item.ocrText,
-               ocrText.localizedCaseInsensitiveContains(query) {
-                return true
-            }
+    private func refreshFilteredItems() {
+        clipboardSearchRevision += 1
+        let revision = clipboardSearchRevision
+
+        guard !isSnippetSearch else {
+            filteredClipboardItems = []
+            syncSelection()
+            return
         }
 
-        if let sourceApp = item.sourceApp,
-           sourceApp.localizedCaseInsensitiveContains(query) {
-            return true
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            filteredClipboardItems = Array(store.items.prefix(Self.initialVisibleClipboardItemLimit))
+            syncSelection()
+            return
         }
 
-        return item.previewText.localizedCaseInsensitiveContains(query)
+        let items = store.items
+        let normalizedQuery = ClipboardStore.normalizeSearchText(query)
+
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.searchDebounceDelay) {
+            let matches = items.filter { item in
+                store.matchesSearch(item, normalizedQuery: normalizedQuery)
+            }
+
+            DispatchQueue.main.async {
+                guard revision == clipboardSearchRevision else { return }
+                filteredClipboardItems = matches
+                syncSelection()
+            }
+        }
     }
 
     private func prepareSnippetDraft(for item: ClipboardItem) {
