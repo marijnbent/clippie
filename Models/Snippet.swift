@@ -60,12 +60,26 @@ struct Snippet: Identifiable, Codable, Equatable {
         try container.encode(usageCount, forKey: .usageCount)
         try container.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
     }
+
+    static func isSupportedTriggerInput(_ trigger: String) -> Bool {
+        let trimmed = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
+        let withoutPrefix = trimmed.hasPrefix(":") ? String(trimmed.dropFirst()) : trimmed
+        guard !withoutPrefix.isEmpty else { return false }
+
+        return withoutPrefix.lowercased().unicodeScalars.allSatisfy { supportedTriggerCharacterSet.contains($0) }
+    }
+
+    static func isSupportedTriggerCharacter(_ character: String) -> Bool {
+        character.lowercased().unicodeScalars.count == 1 &&
+        character.lowercased().unicodeScalars.allSatisfy { supportedTriggerCharacterSet.contains($0) }
+    }
     
     static func normalizeTrigger(_ trigger: String) -> String {
         let trimmed = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
         let withoutPrefix = trimmed.hasPrefix(":") ? String(trimmed.dropFirst()) : trimmed
-        let allowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-        let filtered = withoutPrefix.lowercased().unicodeScalars.filter { allowedCharacters.contains($0) }
+        let filtered = withoutPrefix.lowercased().unicodeScalars.filter { supportedTriggerCharacterSet.contains($0) }
         return String(String.UnicodeScalarView(filtered))
     }
+
+    private static let supportedTriggerCharacterSet = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789")
 }

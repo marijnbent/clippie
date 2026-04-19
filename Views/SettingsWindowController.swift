@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum ClippieSettingsWindowMetrics {
+    static let width: CGFloat = 480
+    static let height: CGFloat = 660
+    static let contentSize = NSSize(width: width, height: height)
+}
+
 enum ClippieSettingsTab: String, CaseIterable {
     case general
     case about
@@ -34,13 +40,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let rootView = ClippieSettingsRootView(mainViewModel: mainViewModel)
         let hostingController = NSHostingController(rootView: rootView)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: ClippieSettingsWindowMetrics.width, height: ClippieSettingsWindowMetrics.height),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Clippie"
         window.contentViewController = hostingController
+        window.setContentSize(ClippieSettingsWindowMetrics.contentSize)
+        window.contentMinSize = ClippieSettingsWindowMetrics.contentSize
         Self.positionWindow(window)
         window.isReleasedWhenClosed = false
         window.delegate = nil
@@ -154,7 +162,11 @@ private struct ClippieSettingsRootView: View {
                 ClippieAboutSettingsView()
             }
         }
-        .frame(minWidth: 460, minHeight: 640)
+        .frame(
+            width: ClippieSettingsWindowMetrics.width,
+            height: ClippieSettingsWindowMetrics.height,
+            alignment: .topLeading
+        )
     }
 }
 

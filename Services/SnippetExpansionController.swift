@@ -15,6 +15,7 @@ final class SnippetExpansionController {
     private var activeQuery: String?
     private var matches: [Snippet] = []
     private var selectedIndex = 0
+    private var hasNavigatedSuggestions = false
     private var activationObserver: NSObjectProtocol?
     private var sessionAnchorRect: CGRect?
     private var sessionAnchorStrategy: AnchorStrategy?
@@ -124,15 +125,23 @@ final class SnippetExpansionController {
             return true
         case 125: // Down
             guard suggestionWindowController.isVisible, !matches.isEmpty else { return false }
+            hasNavigatedSuggestions = true
             selectedIndex = min(selectedIndex + 1, matches.count - 1)
             refreshSuggestions()
             return true
         case 126: // Up
             guard suggestionWindowController.isVisible, !matches.isEmpty else { return false }
+            hasNavigatedSuggestions = true
             selectedIndex = max(selectedIndex - 1, 0)
             refreshSuggestions()
             return true
-        case 36, 48: // Return, Tab
+        case 36: // Return
+            guard suggestionWindowController.isVisible,
+                  let snippet = selectedSnippet,
+                  shouldCommitSnippetSelectionOnReturn else { return false }
+            expand(snippet)
+            return true
+        case 48: // Tab
             guard suggestionWindowController.isVisible, let snippet = selectedSnippet else { return false }
             expand(snippet)
             return true
@@ -164,7 +173,6 @@ final class SnippetExpansionController {
         
         if characters == ":" && disallowedModifiers.isEmpty {
             startSession()
-            refreshSuggestionsAsync()
             return
         }
         
@@ -175,6 +183,11 @@ final class SnippetExpansionController {
             return
         }
         
+        guard Snippet.isSupportedTriggerCharacter(characters) else {
+            cancelSession()
+            return
+        }
+
         let normalizedCharacters = Snippet.normalizeTrigger(characters)
         if normalizedCharacters.count == 1, let scalar = normalizedCharacters.first {
             self.activeQuery = activeQuery + String(scalar)
@@ -198,6 +211,13 @@ final class SnippetExpansionController {
             return
         }
 
+        guard !activeQuery.isEmpty else {
+            matches = []
+            selectedIndex = 0
+            suggestionWindowController.hide()
+            return
+        }
+
         ensureObservationTargetCurrent()
         
         if let exactMatch = exactMatch(for: activeQuery) {
@@ -215,14 +235,26 @@ final class SnippetExpansionController {
             return
         }
         
-        let anchorRect = resolvedSessionAnchorRect()
-        suggestionWindowController.show(snippets: matches, selectedIndex: selectedIndex, anchorRect: anchorRect)
+        let anchorResolution = resolveSessionAnchor()
+        if anchorResolution.strategy.shouldCache {
+            sessionAnchorRect = anchorResolution.rect
+            sessionAnchorStrategy = anchorResolution.strategy
+        }
+        logAnchorResolutionIfNeeded(anchorResolution)
+
+        suggestionWindowController.show(
+            snippets: matches,
+            selectedIndex: selectedIndex,
+            anchorRect: anchorResolution.rect,
+            anchorStrategy: anchorResolution.strategy
+        )
     }
     
     private func cancelSession() {
         activeQuery = nil
         matches = []
         selectedIndex = 0
+        hasNavigatedSuggestions = false
         sessionAnchorRect = nil
         sessionAnchorStrategy = nil
         lastAnchorLogKey = nil
@@ -243,6 +275,7 @@ final class SnippetExpansionController {
         activeQuery = ""
         matches = []
         selectedIndex = 0
+        hasNavigatedSuggestions = false
         sessionAnchorRect = nil
         sessionAnchorStrategy = nil
         lastAnchorLogKey = nil
@@ -314,20 +347,30 @@ final class SnippetExpansionController {
     }
     
     private func fallbackAnchorRect() -> CGRect {
-        let mouseLocation = NSEvent.mouseLocation
-        return CGRect(x: mouseLocation.x, y: mouseLocation.y, width: 1, height: 1)
+        let screen = preferredFallbackScreen()
+        let visibleFrame = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        return CGRect(x: visibleFrame.midX, y: visibleFrame.midY, width: 1, height: 1)
     }
 
-    private func resolvedSessionAnchorRect() -> CGRect {
-        let resolution = resolveSessionAnchor()
-
-        if resolution.strategy.shouldCache {
-            sessionAnchorRect = resolution.rect
-            sessionAnchorStrategy = resolution.strategy
+    private func preferredFallbackScreen() -> NSScreen? {
+        if let sessionAnchorRect,
+           let screen = screen(containing: sessionAnchorRect) {
+            return screen
         }
 
-        logAnchorResolutionIfNeeded(resolution)
-        return resolution.rect
+        if let focusedWindowRect = focusedWindowRect(),
+           let screen = screen(containing: focusedWindowRect) {
+            return screen
+        }
+
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func screen(containing rect: CGRect) -> NSScreen? {
+        let anchorPoint = CGPoint(x: rect.midX, y: rect.midY)
+        return NSScreen.screens.first(where: {
+            $0.frame.contains(anchorPoint) || $0.visibleFrame.intersects(rect)
+        })
     }
 
     private func resolveSessionAnchor() -> AnchorResolution {
@@ -350,47 +393,9 @@ final class SnippetExpansionController {
             )
         }
 
-        if let focusedElement,
-           let focusedElementRect = focusedElementRect(for: focusedElement) {
-            return AnchorResolution(
-                rect: focusedElementRect,
-                strategy: .focusedElement,
-                bundleIdentifier: bundleIdentifier,
-                processID: processID,
-                focusedRole: focusedRole,
-                focusedSubrole: focusedSubrole
-            )
-        }
-
-        let focusedWindowRect = focusedWindowRect()
-        if let sessionAnchorRect,
-           let focusedWindowRect,
-           focusedWindowRect.insetBy(dx: -24, dy: -24).intersects(sessionAnchorRect) {
-            return AnchorResolution(
-                rect: sessionAnchorRect,
-                strategy: .sessionCache,
-                bundleIdentifier: bundleIdentifier,
-                processID: processID,
-                focusedRole: focusedRole,
-                focusedSubrole: focusedSubrole
-            )
-        }
-
-        if let focusedWindowRect,
-           let focusedWindowAnchorRect = focusedWindowAnchorRect(from: focusedWindowRect) {
-            return AnchorResolution(
-                rect: focusedWindowAnchorRect,
-                strategy: .focusedWindow,
-                bundleIdentifier: bundleIdentifier,
-                processID: processID,
-                focusedRole: focusedRole,
-                focusedSubrole: focusedSubrole
-            )
-        }
-
         return AnchorResolution(
             rect: fallbackAnchorRect(),
-            strategy: .mouse,
+            strategy: .screenCenter,
             bundleIdentifier: bundleIdentifier,
             processID: processID,
             focusedRole: focusedRole,
@@ -954,20 +959,25 @@ final class SnippetExpansionController {
     private func playInsertionSound() {
         NSSound(named: NSSound.Name("Pop"))?.play()
     }
+
+    private var shouldCommitSnippetSelectionOnReturn: Bool {
+        guard let activeQuery else {
+            return hasNavigatedSuggestions
+        }
+
+        return !activeQuery.isEmpty || hasNavigatedSuggestions
+    }
 }
 
 private enum AnchorStrategy: String {
     case caretBounds
-    case focusedElement
-    case sessionCache
-    case focusedWindow
-    case mouse
+    case screenCenter
 
     var shouldCache: Bool {
         switch self {
-        case .caretBounds, .focusedElement, .focusedWindow:
+        case .caretBounds:
             return true
-        case .sessionCache, .mouse:
+        case .screenCenter:
             return false
         }
     }
@@ -1019,7 +1029,7 @@ private final class SnippetSuggestionWindowController: NSWindowController {
         window?.isVisible == true
     }
     
-    func show(snippets: [Snippet], selectedIndex: Int, anchorRect: CGRect) {
+    func show(snippets: [Snippet], selectedIndex: Int, anchorRect: CGRect, anchorStrategy: AnchorStrategy) {
         hostingView.rootView = SnippetSuggestionListView(snippets: snippets, selectedIndex: selectedIndex)
         
         let width: CGFloat = 300
@@ -1030,7 +1040,11 @@ private final class SnippetSuggestionWindowController: NSWindowController {
         
         window?.setContentSize(contentRect.size)
         
-        let preferredOrigin = preferredOrigin(for: anchorRect, popupSize: contentRect.size)
+        let preferredOrigin = preferredOrigin(
+            for: anchorRect,
+            popupSize: contentRect.size,
+            anchorStrategy: anchorStrategy
+        )
         window?.setFrameOrigin(preferredOrigin)
         window?.orderFrontRegardless()
     }
@@ -1039,12 +1053,28 @@ private final class SnippetSuggestionWindowController: NSWindowController {
         window?.orderOut(nil)
     }
     
-    private func preferredOrigin(for anchorRect: CGRect, popupSize: CGSize) -> CGPoint {
+    private func preferredOrigin(
+        for anchorRect: CGRect,
+        popupSize: CGSize,
+        anchorStrategy: AnchorStrategy
+    ) -> CGPoint {
         let anchorPoint = CGPoint(x: anchorRect.midX, y: anchorRect.midY)
         let screen = NSScreen.screens.first(where: {
             $0.frame.contains(anchorPoint) || $0.visibleFrame.intersects(anchorRect)
         }) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+
+        if anchorStrategy == .screenCenter {
+            let x = min(
+                max(visibleFrame.midX - (popupSize.width / 2), visibleFrame.minX + 8),
+                visibleFrame.maxX - popupSize.width - 8
+            )
+            let y = min(
+                max(visibleFrame.midY - (popupSize.height / 2), visibleFrame.minY + 8),
+                visibleFrame.maxY - popupSize.height - 8
+            )
+            return CGPoint(x: x, y: y)
+        }
         
         var x = anchorRect.minX
         var y = anchorRect.minY - popupSize.height - 8

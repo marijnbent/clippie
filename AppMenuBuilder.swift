@@ -21,10 +21,10 @@ enum AppMenuBuilder {
 
     private static func addStandardEditMenu(to mainMenu: NSMenu) {
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Cut", action: Selector(("cut:")), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: Selector(("copy:")), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: Selector(("paste:")), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: Selector(("selectAll:")), keyEquivalent: "a")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         attach(submenu: editMenu, to: mainMenu)
     }
 

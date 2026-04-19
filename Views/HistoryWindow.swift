@@ -234,8 +234,8 @@ class HistoryWindowController: NSWindowController {
 
             guard let screen = panel.screen ?? NSScreen.main else { return }
             let visibleFrame = screen.visibleFrame
-            let targetWidth = max(720, floor(visibleFrame.width * 0.7))
-            let targetHeight = max(520, floor(visibleFrame.height * 0.82))
+            let targetWidth = max(960, floor(visibleFrame.width * 0.88))
+            let targetHeight = max(560, floor(visibleFrame.height * 0.86))
             let frame = NSRect(
                 x: visibleFrame.midX - (targetWidth / 2),
                 y: visibleFrame.midY - (targetHeight / 2),
@@ -968,14 +968,18 @@ struct HistoryContentView: View {
                     .fill(Color.black.opacity(reduceTransparencyEnabled ? 0.06 : 0.1))
 
                 if let img = previewImage {
-                    ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                    GeometryReader { proxy in
                         Image(nsImage: img)
                             .resizable()
                             .interpolation(.high)
                             .aspectRatio(contentMode: .fit)
+                            .frame(
+                                width: max(proxy.size.width - 24, 1),
+                                height: max(proxy.size.height - 24, 1)
+                            )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .padding(24)
                     }
+                    .padding(12)
                 } else {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

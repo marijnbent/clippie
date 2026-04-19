@@ -3,6 +3,7 @@ import Combine
 
 enum SnippetStoreError: LocalizedError {
     case emptyTrigger
+    case invalidTriggerCharacters
     case emptyContent
     case duplicateTrigger
     
@@ -10,6 +11,8 @@ enum SnippetStoreError: LocalizedError {
         switch self {
         case .emptyTrigger:
             return "Enter a trigger."
+        case .invalidTriggerCharacters:
+            return "Use letters and numbers only."
         case .emptyContent:
             return "Enter text to insert."
         case .duplicateTrigger:
@@ -39,6 +42,7 @@ final class SnippetStore: ObservableObject {
         }
         
         guard !normalizedTrigger.isEmpty else { throw SnippetStoreError.emptyTrigger }
+        guard Snippet.isSupportedTriggerInput(trigger) else { throw SnippetStoreError.invalidTriggerCharacters }
         guard !trimmedContent.isEmpty else { throw SnippetStoreError.emptyContent }
         guard !snippets.contains(where: { $0.trigger == normalizedTrigger && $0.id != id }) else {
             throw SnippetStoreError.duplicateTrigger

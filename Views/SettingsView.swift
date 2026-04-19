@@ -58,7 +58,15 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityPermission.refresh()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(
+            minWidth: ClippieSettingsWindowMetrics.width,
+            idealWidth: ClippieSettingsWindowMetrics.width,
+            maxWidth: ClippieSettingsWindowMetrics.width,
+            minHeight: ClippieSettingsWindowMetrics.height,
+            idealHeight: ClippieSettingsWindowMetrics.height,
+            maxHeight: .infinity,
+            alignment: .topLeading
+        )
     }
 
     private var keyboardSection: some View {
@@ -158,18 +166,14 @@ struct SettingsView: View {
                 }
             }
         } header: {
-            HStack {
-                Text("Snippets")
-                Spacer()
-                Button {
-                    editingSnippet = SnippetDraft()
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Add snippet")
-            }
+            Text("Snippets")
         } footer: {
-            Text("Type : in any text field to search and insert snippets.")
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Add Snippet") {
+                    editingSnippet = SnippetDraft()
+                }
+                Text("Type : in any text field to search and insert snippets.")
+            }
         }
     }
 
