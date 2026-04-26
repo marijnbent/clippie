@@ -7,7 +7,7 @@ struct ClippieApp: App {
     var body: some Scene {
         // Empty scene - we're a menu bar only app
         Settings {
-            SettingsView()
+            SettingsView(clipboardStore: appDelegate.clipboardStore)
         }
     }
 }

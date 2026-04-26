@@ -36,8 +36,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let mainViewModel = ClippieSettingsMainViewModel()
     private var tabSubscription: AnyCancellable?
 
-    init() {
-        let rootView = ClippieSettingsRootView(mainViewModel: mainViewModel)
+    init(store: ClipboardStore) {
+        let rootView = ClippieSettingsRootView(mainViewModel: mainViewModel, store: store)
         let hostingController = NSHostingController(rootView: rootView)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: ClippieSettingsWindowMetrics.width, height: ClippieSettingsWindowMetrics.height),
@@ -152,12 +152,13 @@ private final class ClippieSettingsMainViewModel: ObservableObject {
 
 private struct ClippieSettingsRootView: View {
     @ObservedObject var mainViewModel: ClippieSettingsMainViewModel
+    let store: ClipboardStore
 
     var body: some View {
         Group {
             switch mainViewModel.selectedTab {
             case .general:
-                SettingsView()
+                SettingsView(clipboardStore: store)
             case .about:
                 ClippieAboutSettingsView()
             }

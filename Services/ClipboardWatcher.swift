@@ -15,7 +15,7 @@ class ClipboardWatcher: ObservableObject {
     private let pollInterval: TimeInterval = 0.5
     
     // Size thresholds for text handling
-    private let inlineTextLimit = 50_000       // 50 KB — store inline
+    private let inlineTextLimit = 10_000       // 10 KB — store inline
     private let previewLength = 500            // Characters kept as inline preview
     
     init(store: ClipboardStore) {

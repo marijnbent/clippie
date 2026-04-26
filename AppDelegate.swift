@@ -8,9 +8,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var historyWindowController: HistoryWindowController?
     private var hotkeyManager: HotkeyManager?
     private var snippetExpansionController: SnippetExpansionController?
-    private lazy var settingsWindowController = SettingsWindowController()
-    
     let clipboardStore = ClipboardStore()
+    private lazy var settingsWindowController = SettingsWindowController(store: clipboardStore)
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon - we're menu bar only

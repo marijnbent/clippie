@@ -8,17 +8,36 @@ struct ClipboardTextChunkSource: Sendable {
     let originalSizeBytes: Int?
 }
 
+private struct ClipboardExportItem: Encodable {
+    let id: UUID
+    let type: ClipboardItemType
+    let timestamp: Date
+    let sourceApp: String?
+    let sourceBundleIdentifier: String?
+    let textContent: String?
+    let imageFilename: String?
+    let ocrText: String?
+    let isTruncated: Bool
+    let originalSizeBytes: Int?
+}
+
 /// Manages persistent storage of clipboard history
 class ClipboardStore: ObservableObject {
     @Published var items: [ClipboardItem] = []
     
     private let fileManager = FileManager.default
     private let saveQueue = DispatchQueue(label: "com.clippie.save", qos: .utility)
+    private let fullTextCacheQueue = DispatchQueue(
+        label: "com.clippie.file-text-cache",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private let fileTextSearchCacheQueue = DispatchQueue(
         label: "com.clippie.file-text-search-cache",
         qos: .userInitiated,
         attributes: .concurrent
     )
+    private var fullTextCache: [UUID: String] = [:]
     private var fileTextSearchCache: [UUID: String] = [:]
     
     private var storageDirectory: URL {
@@ -91,6 +110,7 @@ class ClipboardStore: ObservableObject {
     
     private func performAdd(_ item: ClipboardItem) {
         print("[clippie] Store: Adding item, current count: \(items.count)")
+        invalidateCachedFullText(for: item.id)
         invalidateCachedSearchText(for: item.id)
         
         // Insert at beginning (newest first)
@@ -109,6 +129,7 @@ class ClipboardStore: ObservableObject {
     
     func delete(_ item: ClipboardItem) {
         items.removeAll { $0.id == item.id }
+        invalidateCachedFullText(for: item.id)
         invalidateCachedSearchText(for: item.id)
         deleteAssociatedFiles(for: item)
         
@@ -129,18 +150,26 @@ class ClipboardStore: ObservableObject {
         }
     }
     
-    /// Move an item to the top of the list (most recent position)
-    func moveToTop(_ item: ClipboardItem) {
+    /// Mark an existing item as recently reused so it becomes the newest history entry.
+    func moveToTop(_ item: ClipboardItem, timestamp: Date = Date()) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-        
-        // Already at top, no need to move
-        if index == 0 { return }
-        
-        // Remove from current position and insert at top
-        let removed = items.remove(at: index)
-        items.insert(removed, at: 0)
-        
-        // Save updated order to disk
+
+        var updatedItem = items.remove(at: index)
+        updatedItem = ClipboardItem(
+            id: updatedItem.id,
+            type: updatedItem.type,
+            timestamp: timestamp,
+            sourceApp: updatedItem.sourceApp,
+            sourceBundleIdentifier: updatedItem.sourceBundleIdentifier,
+            textContent: updatedItem.textContent,
+            textFilename: updatedItem.textFilename,
+            imageFilename: updatedItem.imageFilename,
+            ocrText: updatedItem.ocrText,
+            isTruncated: updatedItem.isTruncated,
+            originalSizeBytes: updatedItem.originalSizeBytes
+        )
+        items.insert(updatedItem, at: 0)
+
         let itemsToSave = items
         saveQueue.async { [weak self] in
             self?.saveHistoryToDisk(itemsToSave)
@@ -153,10 +182,131 @@ class ClipboardStore: ObservableObject {
             deleteAssociatedFiles(for: item)
         }
         items.removeAll()
+        clearCachedFullText()
         clearCachedSearchText()
         
         saveQueue.async { [weak self] in
             self?.saveHistoryToDisk([])
+        }
+    }
+
+    var hasImagesOrLargeText: Bool {
+        items.contains(where: isImageOrLargeText)
+    }
+
+    func deleteImagesAndLargeText() {
+        let removed = items.filter(isImageOrLargeText)
+        guard !removed.isEmpty else { return }
+
+        let removedIDs = Set(removed.map(\.id))
+        items.removeAll { removedIDs.contains($0.id) }
+
+        for item in removed {
+            invalidateCachedFullText(for: item.id)
+            invalidateCachedSearchText(for: item.id)
+            deleteAssociatedFiles(for: item)
+        }
+
+        let itemsToSave = items
+        saveQueue.async { [weak self] in
+            self?.saveHistoryToDisk(itemsToSave)
+        }
+    }
+
+    func combinedTextRepresentation() -> String {
+        items
+            .map { item in
+                switch item.type {
+                case .text:
+                    return fullText(for: item) ?? item.textContent ?? ""
+                case .image:
+                    return "Image"
+                }
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    func combinedTextRepresentationForExport() async -> String {
+        var exportedItems: [String] = []
+
+        for item in items {
+            switch item.type {
+            case .text:
+                if let text = await cachedPreviewText(for: item), !text.isEmpty {
+                    exportedItems.append(text)
+                }
+            case .image:
+                exportedItems.append("Image")
+            }
+        }
+
+        return exportedItems.joined(separator: "\n\n")
+    }
+
+    func combinedJSONRepresentation() -> String? {
+        let exportItems = items.map { item in
+            ClipboardExportItem(
+                id: item.id,
+                type: item.type,
+                timestamp: item.timestamp,
+                sourceApp: item.sourceApp,
+                sourceBundleIdentifier: item.sourceBundleIdentifier,
+                textContent: item.type == .text ? (fullText(for: item) ?? item.textContent) : nil,
+                imageFilename: item.imageFilename,
+                ocrText: item.ocrText,
+                isTruncated: item.isTruncated,
+                originalSizeBytes: item.originalSizeBytes
+            )
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        do {
+            let data = try encoder.encode(exportItems)
+            return String(data: data, encoding: .utf8)
+        } catch {
+            print("[clippie] Failed to encode clipboard export JSON: \(error)")
+            return nil
+        }
+    }
+
+    func combinedJSONRepresentationForExport() async -> String? {
+        var exportItems: [ClipboardExportItem] = []
+
+        for item in items {
+            exportItems.append(
+                ClipboardExportItem(
+                    id: item.id,
+                    type: item.type,
+                    timestamp: item.timestamp,
+                    sourceApp: item.sourceApp,
+                    sourceBundleIdentifier: item.sourceBundleIdentifier,
+                    textContent: item.type == .text ? await cachedPreviewText(for: item) : nil,
+                    imageFilename: item.imageFilename,
+                    ocrText: item.ocrText,
+                    isTruncated: item.isTruncated,
+                    originalSizeBytes: item.originalSizeBytes
+                )
+            )
+        }
+
+        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+
+                do {
+                    let data = try encoder.encode(exportItems)
+                    continuation.resume(returning: String(data: data, encoding: .utf8))
+                } catch {
+                    print("[clippie] Failed to encode clipboard export JSON: \(error)")
+                    continuation.resume(returning: nil)
+                }
+            }
         }
     }
     
@@ -195,19 +345,46 @@ class ClipboardStore: ObservableObject {
     
     /// Load full text content from file (lazy loading for large text)
     func fullText(for item: ClipboardItem) -> String? {
+        guard item.type == .text else { return nil }
+        guard item.textFilename != nil else { return item.textContent }
+        return cachedFullText(for: item) ?? item.textContent
+    }
+
+    func cachedPreviewText(for item: ClipboardItem) async -> String? {
+        guard item.type == .text else { return nil }
         guard let filename = item.textFilename else { return item.textContent }
-        let url = textsDirectory.appendingPathComponent(filename)
-        
-        do {
-            return try String(contentsOf: url, encoding: .utf8)
-        } catch {
-            print("[clippie] Failed to load text file: \(error)")
-            return item.textContent // Fallback to inline preview
+
+        if let cached = cachedFullText(for: item) {
+            return cached
         }
+
+        let url = textsDirectory.appendingPathComponent(filename)
+        let loadedText: String? = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let text = try String(contentsOf: url, encoding: .utf8)
+                    continuation.resume(returning: text)
+                } catch {
+                    print("[clippie] Failed to load text file: \(error)")
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+
+        if let loadedText {
+            cacheFullText(loadedText, for: item.id)
+            return loadedText
+        }
+
+        return item.textContent
     }
 
     func matchesSearch(_ item: ClipboardItem, normalizedQuery: String) -> Bool {
         guard !normalizedQuery.isEmpty else { return true }
+
+        if Self.normalizeSearchText(item.type.rawValue).contains(normalizedQuery) {
+            return true
+        }
 
         switch item.type {
         case .text:
@@ -347,6 +524,7 @@ class ClipboardStore: ObservableObject {
             let data = try Data(contentsOf: historyFileURL)
             let loadedItems = try JSONDecoder().decode([ClipboardItem].self, from: data)
             let retentionResult = applyingHistoryRetention(to: loadedItems)
+            clearCachedFullText()
             clearCachedSearchText()
             self.items = retentionResult.retained
             retentionResult.removed.forEach(deleteAssociatedFiles(for:))
@@ -387,6 +565,10 @@ class ClipboardStore: ObservableObject {
         deleteTextFile(for: item)
     }
 
+    private func isImageOrLargeText(_ item: ClipboardItem) -> Bool {
+        item.type == .image || item.isFileBacked || item.isTruncated
+    }
+
     private func normalizedFullTextForSearch(for item: ClipboardItem) -> String? {
         guard let filename = item.textFilename else {
             return item.textContent.map(Self.normalizeSearchText)
@@ -396,10 +578,8 @@ class ClipboardStore: ObservableObject {
             return cached
         }
 
-        let url = textsDirectory.appendingPathComponent(filename)
-
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
+            let text = try loadFullTextFromDisk(filename: filename)
             let normalizedText = Self.normalizeSearchText(text)
             cacheSearchText(normalizedText, for: item.id)
             return normalizedText
@@ -415,15 +595,59 @@ class ClipboardStore: ObservableObject {
         }
     }
 
+    private func cachedFullText(for item: ClipboardItem) -> String? {
+        fullTextCacheQueue.sync {
+            fullTextCache[item.id]
+        } ?? loadAndCacheFullText(for: item)
+    }
+
+    private func loadAndCacheFullText(for item: ClipboardItem) -> String? {
+        guard let filename = item.textFilename else {
+            return item.textContent
+        }
+
+        do {
+            let text = try loadFullTextFromDisk(filename: filename)
+            cacheFullText(text, for: item.id)
+            return text
+        } catch {
+            print("[clippie] Failed to load text file: \(error)")
+            return item.textContent
+        }
+    }
+
+    private func loadFullTextFromDisk(filename: String) throws -> String {
+        let url = textsDirectory.appendingPathComponent(filename)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func cacheFullText(_ text: String, for id: UUID) {
+        fullTextCacheQueue.async(flags: .barrier) {
+            self.fullTextCache[id] = text
+        }
+    }
+
     private func cacheSearchText(_ text: String, for id: UUID) {
         fileTextSearchCacheQueue.async(flags: .barrier) {
             self.fileTextSearchCache[id] = text
         }
     }
 
+    private func invalidateCachedFullText(for id: UUID) {
+        fullTextCacheQueue.async(flags: .barrier) {
+            self.fullTextCache.removeValue(forKey: id)
+        }
+    }
+
     private func invalidateCachedSearchText(for id: UUID) {
         fileTextSearchCacheQueue.async(flags: .barrier) {
             self.fileTextSearchCache.removeValue(forKey: id)
+        }
+    }
+
+    private func clearCachedFullText() {
+        fullTextCacheQueue.async(flags: .barrier) {
+            self.fullTextCache.removeAll()
         }
     }
 
@@ -438,6 +662,7 @@ class ClipboardStore: ObservableObject {
         guard retentionResult.removed.isEmpty == false else { return }
 
         retentionResult.removed.forEach(deleteAssociatedFiles(for:))
+        retentionResult.removed.forEach { invalidateCachedFullText(for: $0.id) }
         retentionResult.removed.forEach { invalidateCachedSearchText(for: $0.id) }
         items = retentionResult.retained
 

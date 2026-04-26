@@ -21,7 +21,13 @@ private struct ChunkedTextState {
     var isLoadingMore: Bool = false
     static let chunkSize = 2_000
     static let initialChars = 2_000
-    var hasMore: Bool { !reachedEOF && loadedCharCount >= Self.initialChars }
+    static let maximumPreviewChars = 8_000
+    var hasMore: Bool {
+        !reachedEOF && loadedCharCount >= Self.initialChars && loadedCharCount < Self.maximumPreviewChars
+    }
+    var reachedPreviewLimit: Bool {
+        !reachedEOF && loadedCharCount >= Self.maximumPreviewChars
+    }
 }
 
 private struct VisualEffectBackdropView: NSViewRepresentable {
@@ -200,6 +206,7 @@ class HistoryWindowController: NSWindowController {
     
     private func pasteItem(_ item: ClipboardItem) {
         let targetApplication = targetApplicationForPaste
+        store.moveToTop(item)
         close()
         NotificationCenter.default.post(name: .bufferIgnoreNextChange, object: nil)
         PasteController.paste(item, store: store, targetApplication: targetApplication)
@@ -389,7 +396,6 @@ private struct QuickActionRow: View {
     let systemImage: String
     let isSelected: Bool
     let action: () -> Void
-    let onHoverSelection: () -> Void
 
     @State private var isHovered = false
 
@@ -438,9 +444,6 @@ private struct QuickActionRow: View {
         .buttonStyle(.plain)
         .onHover { hovering in
             isHovered = hovering
-            if hovering {
-                onHoverSelection()
-            }
         }
     }
 }
@@ -465,7 +468,6 @@ struct HistoryContentView: View {
     @State private var previewImage: NSImage?
     @State private var chunkedText = ChunkedTextState()
     @State private var scrollTrigger = false  // Triggers scroll on keyboard navigation
-    @State private var suppressHoverSelectionUntil = Date.distantPast
     @State private var itemSize: Int?         // Holds computed size of item
     @State private var detailPaneMode: DetailPaneMode = .preview
     @State private var quickActionRoute: QuickActionRoute = .home
@@ -739,7 +741,10 @@ struct HistoryContentView: View {
         guard !chunkedText.isLoadingMore && chunkedText.hasMore else { return }
         
         chunkedText.isLoadingMore = true
-        let nextCharCount = chunkedText.loadedCharCount + ChunkedTextState.chunkSize
+        let nextCharCount = min(
+            chunkedText.loadedCharCount + ChunkedTextState.chunkSize,
+            ChunkedTextState.maximumPreviewChars
+        )
         let chunkSource = store.textChunkSource(for: item)
         
         let chunkResult = await Task.detached(priority: .userInitiated) {
@@ -860,18 +865,6 @@ struct HistoryContentView: View {
                                     .contextMenu {
                                         resultContextMenu(for: result, index: index)
                                     }
-                                    .onHover { hovering in
-                                        if hovering {
-                                            handleHoverSelection(at: index)
-                                        }
-                                    }
-                                    .simultaneousGesture(
-                                        TapGesture(count: 1)
-                                            .onEnded { _ in
-                                                selectResult(at: index)
-                                                activateResult(result)
-                                            }
-                                    )
                             }
                         }
                         .padding(.vertical, 6)
@@ -1122,9 +1115,6 @@ struct HistoryContentView: View {
                         action: {
                             quickActionHomeSelection = index
                             activateQuickAction(option, for: item)
-                        },
-                        onHoverSelection: {
-                            quickActionHomeSelection = index
                         }
                     )
                 }
@@ -1607,16 +1597,6 @@ struct HistoryContentView: View {
         selectedIndex = index
         selectedID = filteredResults[safe: index]?.selectionID
     }
-
-    private func beginKeyboardNavigation() {
-        scrollTrigger = true
-        suppressHoverSelectionUntil = Date().addingTimeInterval(0.35)
-    }
-
-    private func handleHoverSelection(at index: Int) {
-        guard Date() >= suppressHoverSelectionUntil else { return }
-        selectResult(at: index)
-    }
     
     private func syncSelection() {
         guard !filteredResults.isEmpty else {
@@ -1647,7 +1627,7 @@ struct HistoryContentView: View {
         case .text:
             if item.isTruncated {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(item.textContent ?? "")
+                    Text(limitedInlinePreviewText(item.textContent ?? ""))
                         .font(.system(size: 14))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1660,10 +1640,7 @@ struct HistoryContentView: View {
             } else if item.isFileBacked {
                 textContent(item)
             } else {
-                Text(item.textContent ?? "")
-                    .font(.system(size: 14))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                inlineTextContent(item.textContent ?? "")
             }
         case .image:
             VStack(spacing: 12) {
@@ -1729,6 +1706,25 @@ struct HistoryContentView: View {
     }
     
     @ViewBuilder
+    private func inlineTextContent(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(limitedInlinePreviewText(text))
+                .font(.system(size: 14))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            if text.count > ChunkedTextState.maximumPreviewChars {
+                previewLimitText(totalBytes: text.utf8.count)
+            }
+        }
+    }
+
+    private func limitedInlinePreviewText(_ text: String) -> String {
+        guard text.count > ChunkedTextState.maximumPreviewChars else { return text }
+        return String(text.prefix(ChunkedTextState.maximumPreviewChars))
+    }
+
+    @ViewBuilder
     private func textContent(_ item: ClipboardItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(chunkedText.visibleText)
@@ -1751,8 +1747,18 @@ struct HistoryContentView: View {
                     .onAppear {
                         Task { await loadNextChunk(for: item) }
                     }
+            } else if chunkedText.reachedPreviewLimit {
+                previewLimitText(totalBytes: chunkedText.totalBytes)
             }
         }
+    }
+
+    private func previewLimitText(totalBytes: Int) -> some View {
+        Text("— preview limited to \(ChunkedTextState.maximumPreviewChars.formatted()) chars · \(formattedByteCount(totalBytes)) total —")
+            .font(.system(size: 11))
+            .foregroundColor(.secondary.opacity(0.4))
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 6)
     }
     
     private func navigateUp() {
@@ -1771,7 +1777,7 @@ struct HistoryContentView: View {
         }
 
         if selectedIndex > 0 {
-            beginKeyboardNavigation()
+            scrollTrigger = true
             selectedIndex -= 1
         }
     }
@@ -1794,7 +1800,7 @@ struct HistoryContentView: View {
         }
 
         if selectedIndex < filteredResults.count - 1 {
-            beginKeyboardNavigation()
+            scrollTrigger = true
             selectedIndex += 1
         }
     }

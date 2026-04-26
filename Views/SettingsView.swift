@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 /// Settings view for configuring clippie preferences
 struct SettingsView: View {
+    @ObservedObject var clipboardStore: ClipboardStore
     @StateObject private var settings = SettingsViewModel()
     @StateObject private var snippetStore = SnippetStore.shared
     @StateObject private var accessibilityPermission = AccessibilityPermissionViewModel()
@@ -11,6 +12,10 @@ struct SettingsView: View {
     @State private var recordedKeyCode: UInt16 = 0
     @State private var recordedModifiers = HotkeyModifiers()
     @State private var showingTrimAlert = false
+    @State private var showingDeleteAllAlert = false
+    @State private var showingDeleteImagesAndLargeTextAlert = false
+    @State private var isCopyingPlainText = false
+    @State private var isCopyingJSON = false
     @State private var pendingTier: HistoryLimit?
     @State private var editingSnippet: SnippetDraft?
     @State private var snippetErrorMessage: String?
@@ -32,6 +37,22 @@ struct SettingsView: View {
             }
         } message: {
             Text("This will permanently delete clipboard history older than \(pendingTier?.label ?? "the selected period"). This action cannot be undone.")
+        }
+        .alert("Delete All Items?", isPresented: $showingDeleteAllAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete All", role: .destructive) {
+                clipboardStore.clear()
+            }
+        } message: {
+            Text("This will permanently delete all clipboard history. This action cannot be undone.")
+        }
+        .alert("Delete Images and Large Text?", isPresented: $showingDeleteImagesAndLargeTextAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                clipboardStore.deleteImagesAndLargeText()
+            }
+        } message: {
+            Text("This will permanently delete all images and large text clips. This action cannot be undone.")
         }
         .alert("Snippet", isPresented: Binding(
             get: { snippetErrorMessage != nil },
@@ -126,6 +147,66 @@ struct SettingsView: View {
                 Text("Behavior")
             } footer: {
                 Text("Choose how long clipboard history should be kept.")
+            }
+
+            Section {
+                Button("Delete Images and Large Text", role: .destructive) {
+                    showingDeleteImagesAndLargeTextAlert = true
+                }
+                .disabled(!clipboardStore.hasImagesOrLargeText)
+
+                Button("Delete All Items", role: .destructive) {
+                    showingDeleteAllAlert = true
+                }
+                .disabled(clipboardStore.items.isEmpty)
+            } header: {
+                Text("History")
+            } footer: {
+                Text("Remove large clips or delete the entire clipboard history.")
+            }
+
+            Section {
+                HStack(spacing: 8) {
+                    Button(isCopyingPlainText ? "Copying..." : "Copy as Plain Text") {
+                        copyClipboardHistoryAsPlainText()
+                    }
+                    .disabled(clipboardStore.items.isEmpty || isCopyingPlainText || isCopyingJSON)
+
+                    Button(isCopyingJSON ? "Copying..." : "Copy as JSON") {
+                        copyClipboardHistoryAsJSON()
+                    }
+                    .disabled(clipboardStore.items.isEmpty || isCopyingPlainText || isCopyingJSON)
+                }
+            } header: {
+                Text("Export")
+            } footer: {
+                Text("Copy the current clipboard history in the format you want.")
+            }
+        }
+    }
+
+    private func copyClipboardHistoryAsPlainText() {
+        isCopyingPlainText = true
+
+        Task {
+            let text = await clipboardStore.combinedTextRepresentationForExport()
+            await MainActor.run {
+                PasteController.copyTextToClipboard(text)
+                isCopyingPlainText = false
+            }
+        }
+    }
+
+    private func copyClipboardHistoryAsJSON() {
+        isCopyingJSON = true
+
+        Task {
+            let json = await clipboardStore.combinedJSONRepresentationForExport()
+            await MainActor.run {
+                if let json {
+                    PasteController.copyTextToClipboard(json)
+                }
+                isCopyingJSON = false
             }
         }
     }
