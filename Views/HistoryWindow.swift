@@ -332,7 +332,16 @@ private enum DetailPaneMode: Equatable {
 private enum QuickActionRoute: Equatable {
     case home
     case saveSnippet
-    case confirmDelete
+    case confirmation(QuickActionConfirmationKind)
+}
+
+private enum QuickActionConfirmationKind: Equatable {
+    case deleteHistory
+}
+
+private enum QuickActionConfirmationChoice: Equatable {
+    case cancel
+    case confirm
 }
 
 private enum QuickActionHomeOption: Equatable {
@@ -392,20 +401,54 @@ private struct SnippetRow: View {
 }
 
 private struct QuickActionRow: View {
+    enum Tone {
+        case normal
+        case destructive
+
+        var iconColor: Color {
+            switch self {
+            case .normal:
+                return .secondary
+            case .destructive:
+                return .red
+            }
+        }
+
+        var textColor: Color {
+            switch self {
+            case .normal:
+                return .primary
+            case .destructive:
+                return .red
+            }
+        }
+
+        func backgroundColor(isSelected: Bool, isHovered: Bool) -> Color {
+            switch (self, isSelected, isHovered) {
+            case (.destructive, true, _):
+                return Color.red.opacity(0.11)
+            case (.destructive, false, true):
+                return Color.red.opacity(0.07)
+            case (.normal, true, _):
+                return Color.primary.opacity(0.08)
+            case (.normal, false, true):
+                return Color.primary.opacity(0.05)
+            default:
+                return Color.clear
+            }
+        }
+    }
+
     let title: String
     let systemImage: String
     let isSelected: Bool
+    var tone: Tone = .normal
     let action: () -> Void
 
     @State private var isHovered = false
 
     private var backgroundColor: Color {
-        if isSelected {
-            return Color.primary.opacity(0.08)
-        } else if isHovered {
-            return Color.primary.opacity(0.05)
-        }
-        return Color.clear
+        tone.backgroundColor(isSelected: isSelected, isHovered: isHovered)
     }
 
     private var backgroundCornerRadius: CGFloat {
@@ -417,12 +460,12 @@ private struct QuickActionRow: View {
             HStack(spacing: 12) {
                 Image(systemName: systemImage)
                     .font(.system(size: 13))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(tone.iconColor)
                     .frame(width: 18, height: 18)
 
                 Text(title)
                     .font(.system(size: 13))
-                    .foregroundColor(.primary)
+                    .foregroundColor(tone.textColor)
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
@@ -474,6 +517,7 @@ struct HistoryContentView: View {
     @State private var snippetDraftTrigger = ""
     @State private var snippetDraftContent = ""
     @State private var quickActionHomeSelection = 0
+    @State private var quickActionConfirmationSelection = 0
     @State private var quickActionMessage: String?
     @State private var quickActionError: String?
     @State private var filteredClipboardItems: [ClipboardItem] = []
@@ -529,7 +573,7 @@ struct HistoryContentView: View {
     
     private var selectedItem: ClipboardItem? {
         if case .clipboard(let item)? = selectedResult {
-            return item
+            return store.items.first(where: { $0.id == item.id }) ?? item
         }
         return nil
     }
@@ -1055,8 +1099,8 @@ struct HistoryContentView: View {
                         quickActionsHomePane(for: item)
                     case .saveSnippet:
                         quickActionSaveSnippetPane(for: item)
-                    case .confirmDelete:
-                        quickActionDeletePane(for: item)
+                    case .confirmation(let confirmation):
+                        quickActionConfirmationPane(for: confirmation, item: item)
                     }
                 }
                 .padding(.horizontal, isHome ? 0 : 14)
@@ -1072,10 +1116,7 @@ struct HistoryContentView: View {
         HStack(spacing: 4) {
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.15)) {
-                    quickActionRoute = .home
-                    quickActionFocusedField = nil
-                    quickActionError = nil
-                    quickActionMessage = nil
+                    returnToQuickActionsHome()
                 }
             }) {
                 HStack(spacing: 3) {
@@ -1112,6 +1153,7 @@ struct HistoryContentView: View {
                         title: quickActionTitle(for: option, item: item),
                         systemImage: quickActionSystemImage(for: option),
                         isSelected: isSelected,
+                        tone: isDestructive ? .destructive : .normal,
                         action: {
                             quickActionHomeSelection = index
                             activateQuickAction(option, for: item)
@@ -1183,19 +1225,21 @@ struct HistoryContentView: View {
         }
     }
 
-    private func quickActionDeletePane(for item: ClipboardItem) -> some View {
+    private func quickActionConfirmationPane(
+        for confirmation: QuickActionConfirmationKind,
+        item: ClipboardItem
+    ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Warning block
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "trash")
+                Image(systemName: quickActionConfirmationSystemImage(for: confirmation))
                     .font(.system(size: 13))
-                    .foregroundColor(.red)
+                    .foregroundColor(quickActionConfirmationTint(for: confirmation))
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Remove from History")
+                    Text(quickActionConfirmationTitle(for: confirmation))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.primary)
-                    Text("This clipboard item will be permanently removed. This cannot be undone.")
+                    Text(quickActionConfirmationMessage(for: confirmation))
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1203,21 +1247,28 @@ struct HistoryContentView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.red.opacity(0.06),
+            .background(quickActionConfirmationTint(for: confirmation).opacity(0.06),
                         in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.red.opacity(0.12), lineWidth: 1)
+                    .stroke(quickActionConfirmationTint(for: confirmation).opacity(0.12), lineWidth: 1)
             )
 
-            Button(role: .destructive) {
-                deleteSelectedItem(item)
-            } label: {
-                Text("Delete")
-                    .frame(maxWidth: .infinity)
+            VStack(spacing: 0) {
+                let choices = quickActionConfirmationChoices(for: confirmation)
+                ForEach(Array(choices.enumerated()), id: \.offset) { index, choice in
+                    QuickActionRow(
+                        title: quickActionConfirmationChoiceTitle(for: choice, confirmation: confirmation),
+                        systemImage: quickActionConfirmationChoiceSystemImage(for: choice, confirmation: confirmation),
+                        isSelected: index == quickActionConfirmationSelection,
+                        tone: quickActionConfirmationChoiceTone(for: choice, confirmation: confirmation),
+                        action: {
+                            quickActionConfirmationSelection = index
+                            activateQuickActionConfirmation(choice, confirmation: confirmation, item: item)
+                        }
+                    )
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
         }
     }
 
@@ -1388,6 +1439,79 @@ struct HistoryContentView: View {
         }
     }
 
+    private func quickActionConfirmationTitle(for confirmation: QuickActionConfirmationKind) -> String {
+        switch confirmation {
+        case .deleteHistory:
+            return "Remove from History"
+        }
+    }
+
+    private func quickActionConfirmationMessage(for confirmation: QuickActionConfirmationKind) -> String {
+        switch confirmation {
+        case .deleteHistory:
+            return "This clipboard item will be permanently removed. This cannot be undone."
+        }
+    }
+
+    private func quickActionConfirmationSystemImage(for confirmation: QuickActionConfirmationKind) -> String {
+        switch confirmation {
+        case .deleteHistory:
+            return "trash"
+        }
+    }
+
+    private func quickActionConfirmationTint(for confirmation: QuickActionConfirmationKind) -> Color {
+        switch confirmation {
+        case .deleteHistory:
+            return .red
+        }
+    }
+
+    private func quickActionConfirmationChoices(
+        for confirmation: QuickActionConfirmationKind
+    ) -> [QuickActionConfirmationChoice] {
+        switch confirmation {
+        case .deleteHistory:
+            return [.cancel, .confirm]
+        }
+    }
+
+    private func quickActionConfirmationChoiceTitle(
+        for choice: QuickActionConfirmationChoice,
+        confirmation: QuickActionConfirmationKind
+    ) -> String {
+        switch (confirmation, choice) {
+        case (_, .cancel):
+            return "Cancel"
+        case (.deleteHistory, .confirm):
+            return "Delete"
+        }
+    }
+
+    private func quickActionConfirmationChoiceSystemImage(
+        for choice: QuickActionConfirmationChoice,
+        confirmation: QuickActionConfirmationKind
+    ) -> String {
+        switch (confirmation, choice) {
+        case (_, .cancel):
+            return "xmark"
+        case (.deleteHistory, .confirm):
+            return "trash"
+        }
+    }
+
+    private func quickActionConfirmationChoiceTone(
+        for choice: QuickActionConfirmationChoice,
+        confirmation: QuickActionConfirmationKind
+    ) -> QuickActionRow.Tone {
+        switch (confirmation, choice) {
+        case (.deleteHistory, .confirm):
+            return .destructive
+        default:
+            return .normal
+        }
+    }
+
     private func activateQuickAction(_ option: QuickActionHomeOption, for item: ClipboardItem) {
         switch option {
         case .showLargerImage:
@@ -1399,14 +1523,45 @@ struct HistoryContentView: View {
         case .deleteHistory:
             quickActionMessage = nil
             quickActionError = nil
-            quickActionRoute = .confirmDelete
+            quickActionRoute = .confirmation(.deleteHistory)
+            quickActionConfirmationSelection = defaultQuickActionConfirmationSelection(for: .deleteHistory)
         }
+    }
+
+    private func defaultQuickActionConfirmationSelection(for confirmation: QuickActionConfirmationKind) -> Int {
+        let choices = quickActionConfirmationChoices(for: confirmation)
+        return choices.firstIndex(of: .confirm) ?? 0
+    }
+
+    private func activateQuickActionConfirmation(
+        _ choice: QuickActionConfirmationChoice,
+        confirmation: QuickActionConfirmationKind,
+        item: ClipboardItem
+    ) {
+        switch choice {
+        case .cancel:
+            returnToQuickActionsHome()
+        case .confirm:
+            switch confirmation {
+            case .deleteHistory:
+                deleteSelectedItem(item)
+            }
+        }
+    }
+
+    private func returnToQuickActionsHome() {
+        quickActionRoute = .home
+        quickActionConfirmationSelection = 0
+        quickActionFocusedField = nil
+        quickActionError = nil
+        quickActionMessage = nil
     }
 
     private func resetQuickActionState() {
         setDetailPaneMode(.preview)
         quickActionRoute = .home
         quickActionHomeSelection = 0
+        quickActionConfirmationSelection = 0
         quickActionFocusedField = nil
         snippetDraftTrigger = ""
         snippetDraftContent = ""
@@ -1492,9 +1647,9 @@ struct HistoryContentView: View {
             DispatchQueue.main.async {
                 quickActionFocusedField = .snippetTrigger
             }
-        case .confirmDelete:
+        case .confirmation(let confirmation):
+            quickActionConfirmationSelection = defaultQuickActionConfirmationSelection(for: confirmation)
             quickActionFocusedField = nil
-            break
         }
     }
 
@@ -1535,13 +1690,16 @@ struct HistoryContentView: View {
     private func runOCR(for item: ClipboardItem) {
         guard item.type == .image else { return }
         guard let image = store.image(for: item) else {
+            openQuickActions(for: item)
             quickActionError = "Couldn't load this image."
             quickActionMessage = nil
             return
         }
 
-        setDetailPaneMode(.quickActions)
+        setDetailPaneMode(.preview)
         quickActionRoute = .home
+        quickActionConfirmationSelection = 0
+        quickActionFocusedField = nil
         quickActionMessage = nil
         quickActionError = nil
         isExtractingText = true
@@ -1554,9 +1712,13 @@ struct HistoryContentView: View {
                 let resolvedText = (text?.isEmpty == false) ? text! : "No text found in this image."
                 store.setOCRText(resolvedText, for: item)
                 isExtractingText = false
-                quickActionMessage = resolvedText == "No text found in this image."
-                    ? resolvedText
-                    : "OCR text is ready."
+                guard selectedItem?.id == item.id else { return }
+                setDetailPaneMode(.preview)
+                quickActionRoute = .home
+                quickActionConfirmationSelection = 0
+                quickActionFocusedField = nil
+                quickActionMessage = nil
+                quickActionError = nil
             }
         }
     }
@@ -1578,8 +1740,14 @@ struct HistoryContentView: View {
                 if quickActionFocusedField == .snippetTrigger {
                     saveSnippetFromQuickActions()
                 }
-            case .confirmDelete:
-                deleteSelectedItem(item)
+            case .confirmation(let confirmation):
+                let choices = quickActionConfirmationChoices(for: confirmation)
+                guard choices.indices.contains(quickActionConfirmationSelection) else { return }
+                activateQuickActionConfirmation(
+                    choices[quickActionConfirmationSelection],
+                    confirmation: confirmation,
+                    item: item
+                )
             }
             return
         }
@@ -1770,8 +1938,10 @@ struct HistoryContentView: View {
             switch quickActionRoute {
             case .home:
                 quickActionHomeSelection = max(quickActionHomeSelection - 1, 0)
-            case .saveSnippet, .confirmDelete:
+            case .saveSnippet:
                 break
+            case .confirmation:
+                quickActionConfirmationSelection = max(quickActionConfirmationSelection - 1, 0)
             }
             return
         }
@@ -1793,8 +1963,11 @@ struct HistoryContentView: View {
                 guard let item = selectedItem else { return }
                 let maxIndex = max(quickActionOptions(for: item).count - 1, 0)
                 quickActionHomeSelection = min(quickActionHomeSelection + 1, maxIndex)
-            case .saveSnippet, .confirmDelete:
+            case .saveSnippet:
                 break
+            case .confirmation(let confirmation):
+                let maxIndex = max(quickActionConfirmationChoices(for: confirmation).count - 1, 0)
+                quickActionConfirmationSelection = min(quickActionConfirmationSelection + 1, maxIndex)
             }
             return
         }
@@ -1813,11 +1986,8 @@ struct HistoryContentView: View {
             switch quickActionRoute {
             case .home:
                 closeDetailOverlay()
-            case .saveSnippet, .confirmDelete:
-                quickActionRoute = .home
-                quickActionFocusedField = nil
-                quickActionMessage = nil
-                quickActionError = nil
+            case .saveSnippet, .confirmation:
+                returnToQuickActionsHome()
             }
         case .preview:
             break
@@ -1830,10 +2000,23 @@ struct HistoryContentView: View {
             guard let item = selectedItem else { return }
             openQuickActions(for: item)
         case .quickActions:
-            guard quickActionRoute == .home, let item = selectedItem else { return }
-            let options = quickActionOptions(for: item)
-            guard options.indices.contains(quickActionHomeSelection) else { return }
-            activateQuickAction(options[quickActionHomeSelection], for: item)
+            guard let item = selectedItem else { return }
+            switch quickActionRoute {
+            case .home:
+                let options = quickActionOptions(for: item)
+                guard options.indices.contains(quickActionHomeSelection) else { return }
+                activateQuickAction(options[quickActionHomeSelection], for: item)
+            case .saveSnippet:
+                break
+            case .confirmation(let confirmation):
+                let choices = quickActionConfirmationChoices(for: confirmation)
+                guard choices.indices.contains(quickActionConfirmationSelection) else { return }
+                activateQuickActionConfirmation(
+                    choices[quickActionConfirmationSelection],
+                    confirmation: confirmation,
+                    item: item
+                )
+            }
         case .imagePreview:
             break
         }

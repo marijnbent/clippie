@@ -142,9 +142,13 @@ class ClipboardStore: ObservableObject {
     /// Save extracted OCR text for an image item
     func setOCRText(_ text: String, for item: ClipboardItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-        items[index].ocrText = text
+        guard items[index].ocrText != text else { return }
+
+        var updatedItems = items
+        updatedItems[index].ocrText = text
+        items = updatedItems
         
-        let itemsToSave = items
+        let itemsToSave = updatedItems
         saveQueue.async { [weak self] in
             self?.saveHistoryToDisk(itemsToSave)
         }

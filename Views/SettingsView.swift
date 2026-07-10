@@ -8,6 +8,7 @@ struct SettingsView: View {
     @StateObject private var settings = SettingsViewModel()
     @StateObject private var snippetStore = SnippetStore.shared
     @StateObject private var accessibilityPermission = AccessibilityPermissionViewModel()
+    @StateObject private var inputMonitoringPermission = InputMonitoringPermissionViewModel()
     @State private var isRecording = false
     @State private var recordedKeyCode: UInt16 = 0
     @State private var recordedModifiers = HotkeyModifiers()
@@ -75,9 +76,11 @@ struct SettingsView: View {
         })
         .onAppear {
             accessibilityPermission.refresh()
+            inputMonitoringPermission.refresh()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityPermission.refresh()
+            inputMonitoringPermission.refresh()
         }
         .frame(
             minWidth: ClippieSettingsWindowMetrics.width,
@@ -115,6 +118,7 @@ struct SettingsView: View {
         Group {
             Section {
                 accessibilityPermissionRow
+                inputMonitoringPermissionRow
             } header: {
                 Text("Permissions")
             }
@@ -231,6 +235,31 @@ struct SettingsView: View {
             } icon: {
                 Circle()
                     .fill(accessibilityPermission.isTrusted ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+            }
+        }
+    }
+
+    private var inputMonitoringPermissionRow: some View {
+        LabeledContent {
+            Button(inputMonitoringPermission.isTrusted ? "Open Settings" : "Request") {
+                if inputMonitoringPermission.isTrusted {
+                    inputMonitoringPermission.openSystemSettings()
+                } else {
+                    inputMonitoringPermission.requestAccess()
+                }
+            }
+        } label: {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Input Monitoring")
+                    Text(inputMonitoringPermission.isTrusted ? "Granted" : "Not granted")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Circle()
+                    .fill(inputMonitoringPermission.isTrusted ? Color.green : Color.orange)
                     .frame(width: 8, height: 8)
             }
         }
@@ -455,6 +484,31 @@ final class AccessibilityPermissionViewModel: ObservableObject {
             return
         }
         
+        NSWorkspace.shared.open(url)
+    }
+}
+
+@MainActor
+final class InputMonitoringPermissionViewModel: ObservableObject {
+    @Published private(set) var isTrusted = CGPreflightListenEventAccess()
+
+    func refresh() {
+        isTrusted = CGPreflightListenEventAccess()
+    }
+
+    func requestAccess() {
+        isTrusted = CGRequestListenEventAccess()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            self?.refresh()
+        }
+    }
+
+    func openSystemSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
+            return
+        }
+
         NSWorkspace.shared.open(url)
     }
 }

@@ -114,11 +114,21 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     }
     
     static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id &&
+            lhs.type == rhs.type &&
+            lhs.timestamp == rhs.timestamp &&
+            lhs.sourceApp == rhs.sourceApp &&
+            lhs.sourceBundleIdentifier == rhs.sourceBundleIdentifier &&
+            lhs.textContent == rhs.textContent &&
+            lhs.textFilename == rhs.textFilename &&
+            lhs.imageFilename == rhs.imageFilename &&
+            lhs.ocrText == rhs.ocrText &&
+            lhs.isTruncated == rhs.isTruncated &&
+            lhs.originalSizeBytes == rhs.originalSizeBytes
     }
 }
 
-enum ClipboardItemType: String, Codable {
+enum ClipboardItemType: String, Codable, Equatable {
     case text
     case image
 }

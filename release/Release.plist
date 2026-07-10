@@ -22,6 +22,8 @@
   <string>1.0</string>
   <key>MinimumSystemVersion</key>
   <string>13.0</string>
+  <key>NSInputMonitoringUsageDescription</key>
+  <string>Clippie needs input monitoring to intercept the configured shortcut globally.</string>
   <key>ProductName</key>
   <string>Clippie</string>
   <key>SigningIdentity</key>
