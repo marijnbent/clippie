@@ -195,12 +195,10 @@ class HistoryWindowController: NSWindowController {
     }
     
     private func copyToClipboard(_ item: ClipboardItem) {
-        NotificationCenter.default.post(name: .bufferIgnoreNextChange, object: nil)
         PasteController.copyToClipboard(item, store: store)
     }
     
     private func copyTextToClipboard(_ text: String) {
-        NotificationCenter.default.post(name: .bufferIgnoreNextChange, object: nil)
         PasteController.copyTextToClipboard(text)
     }
     
@@ -208,14 +206,12 @@ class HistoryWindowController: NSWindowController {
         let targetApplication = targetApplicationForPaste
         store.moveToTop(item)
         close()
-        NotificationCenter.default.post(name: .bufferIgnoreNextChange, object: nil)
         PasteController.paste(item, store: store, targetApplication: targetApplication)
     }
     
     private func pasteText(_ text: String) {
         let targetApplication = targetApplicationForPaste
         close()
-        NotificationCenter.default.post(name: .bufferIgnoreNextChange, object: nil)
         PasteController.paste(text: text, targetApplication: targetApplication)
     }
     
@@ -288,7 +284,7 @@ class HistoryWindowController: NSWindowController {
 }
 
 extension Notification.Name {
-    static let bufferIgnoreNextChange = Notification.Name("bufferIgnoreNextChange")
+    static let bufferDidWritePasteboard = Notification.Name("bufferDidWritePasteboard")
     static let bufferHotkeyChanged = Notification.Name("bufferHotkeyChanged")
     static let bufferWindowDidOpen = Notification.Name("bufferWindowDidOpen")
     static let bufferHistoryLimitChanged = Notification.Name("bufferHistoryLimitChanged")
@@ -1842,9 +1838,7 @@ struct HistoryContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .topLeading)
                             
                             Button(action: {
-                                NotificationCenter.default.post(name: .bufferIgnoreNextChange, object: nil)
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(ocrText, forType: .string)
+                                PasteController.copyTextToClipboard(ocrText)
                             }) {
                                 Image(systemName: "doc.on.doc")
                                     .font(.system(size: 12))

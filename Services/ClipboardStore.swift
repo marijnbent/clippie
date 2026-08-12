@@ -27,6 +27,9 @@ class ClipboardStore: ObservableObject {
     
     private let fileManager = FileManager.default
     private let saveQueue = DispatchQueue(label: "com.clippie.save", qos: .utility)
+    private let saveStateLock = NSLock()
+    private var pendingHistorySnapshot: [ClipboardItem]?
+    private var isHistorySaveWorkerRunning = false
     private let fullTextCacheQueue = DispatchQueue(
         label: "com.clippie.file-text-cache",
         qos: .userInitiated,
@@ -120,11 +123,7 @@ class ClipboardStore: ObservableObject {
         
         print("[clippie] Store: New count: \(items.count)")
         
-        // Save to disk in background
-        let itemsToSave = items
-        saveQueue.async { [weak self] in
-            self?.saveHistoryToDisk(itemsToSave)
-        }
+        scheduleHistorySave(items)
     }
     
     func delete(_ item: ClipboardItem) {
@@ -133,10 +132,7 @@ class ClipboardStore: ObservableObject {
         invalidateCachedSearchText(for: item.id)
         deleteAssociatedFiles(for: item)
         
-        let itemsToSave = items
-        saveQueue.async { [weak self] in
-            self?.saveHistoryToDisk(itemsToSave)
-        }
+        scheduleHistorySave(items)
     }
     
     /// Save extracted OCR text for an image item
@@ -148,10 +144,7 @@ class ClipboardStore: ObservableObject {
         updatedItems[index].ocrText = text
         items = updatedItems
         
-        let itemsToSave = updatedItems
-        saveQueue.async { [weak self] in
-            self?.saveHistoryToDisk(itemsToSave)
-        }
+        scheduleHistorySave(updatedItems)
     }
     
     /// Mark an existing item as recently reused so it becomes the newest history entry.
@@ -174,10 +167,7 @@ class ClipboardStore: ObservableObject {
         )
         items.insert(updatedItem, at: 0)
 
-        let itemsToSave = items
-        saveQueue.async { [weak self] in
-            self?.saveHistoryToDisk(itemsToSave)
-        }
+        scheduleHistorySave(items)
     }
     
     func clear() {
@@ -189,9 +179,7 @@ class ClipboardStore: ObservableObject {
         clearCachedFullText()
         clearCachedSearchText()
         
-        saveQueue.async { [weak self] in
-            self?.saveHistoryToDisk([])
-        }
+        scheduleHistorySave([])
     }
 
     var hasImagesOrLargeText: Bool {
@@ -211,10 +199,7 @@ class ClipboardStore: ObservableObject {
             deleteAssociatedFiles(for: item)
         }
 
-        let itemsToSave = items
-        saveQueue.async { [weak self] in
-            self?.saveHistoryToDisk(itemsToSave)
-        }
+        scheduleHistorySave(items)
     }
 
     func combinedTextRepresentation() -> String {
@@ -325,7 +310,7 @@ class ClipboardStore: ObservableObject {
         let url = imagesDirectory.appendingPathComponent(filename)
         
         do {
-            try data.write(to: url)
+            try data.write(to: url, options: .atomic)
             return filename
         } catch {
             print("[clippie] Failed to save image: \(error)")
@@ -334,12 +319,12 @@ class ClipboardStore: ObservableObject {
     }
     
     /// Save large text to a file and return the filename
-    func saveText(_ text: String) -> String? {
+    func saveText(_ utf8Data: Data) -> String? {
         let filename = UUID().uuidString + ".txt"
         let url = textsDirectory.appendingPathComponent(filename)
         
         do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            try utf8Data.write(to: url, options: .atomic)
             return filename
         } catch {
             print("[clippie] Failed to save text file: \(error)")
@@ -533,8 +518,7 @@ class ClipboardStore: ObservableObject {
             self.items = retentionResult.retained
             retentionResult.removed.forEach(deleteAssociatedFiles(for:))
             if !retentionResult.removed.isEmpty {
-                let retained = retentionResult.retained
-                saveQueue.async { [weak self] in self?.saveHistoryToDisk(retained) }
+                scheduleHistorySave(retentionResult.retained)
             }
             print("[clippie] Loaded \(retentionResult.retained.count) items from history")
         } catch {
@@ -542,10 +526,50 @@ class ClipboardStore: ObservableObject {
         }
     }
     
+    /// Wait for the newest history snapshot to reach disk. Call this during app termination.
+    func flushPendingHistorySave() {
+        scheduleHistorySave(items)
+        saveQueue.sync {}
+    }
+
+    private func scheduleHistorySave(_ snapshot: [ClipboardItem]) {
+        saveStateLock.lock()
+        pendingHistorySnapshot = snapshot
+        let shouldStartWorker = !isHistorySaveWorkerRunning
+        if shouldStartWorker {
+            isHistorySaveWorkerRunning = true
+        }
+        saveStateLock.unlock()
+
+        guard shouldStartWorker else { return }
+        saveQueue.async { [self] in
+            drainPendingHistorySaves()
+        }
+    }
+
+    private func drainPendingHistorySaves() {
+        while let snapshot = takePendingHistorySnapshot() {
+            saveHistoryToDisk(snapshot)
+        }
+    }
+
+    private func takePendingHistorySnapshot() -> [ClipboardItem]? {
+        saveStateLock.lock()
+        defer { saveStateLock.unlock() }
+
+        guard let snapshot = pendingHistorySnapshot else {
+            isHistorySaveWorkerRunning = false
+            return nil
+        }
+
+        pendingHistorySnapshot = nil
+        return snapshot
+    }
+
     private func saveHistoryToDisk(_ itemsToSave: [ClipboardItem]) {
         do {
             let data = try JSONEncoder().encode(itemsToSave)
-            try data.write(to: historyFileURL)
+            try data.write(to: historyFileURL, options: .atomic)
         } catch {
             print("[clippie] Failed to save history: \(error)")
         }
@@ -671,8 +695,7 @@ class ClipboardStore: ObservableObject {
         items = retentionResult.retained
 
         guard persist else { return }
-        let retained = retentionResult.retained
-        saveQueue.async { [weak self] in self?.saveHistoryToDisk(retained) }
+        scheduleHistorySave(retentionResult.retained)
     }
 
     private func applyingHistoryRetention(to items: [ClipboardItem], referenceDate: Date = Date()) -> (retained: [ClipboardItem], removed: [ClipboardItem]) {

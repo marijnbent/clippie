@@ -4,47 +4,65 @@ import Cocoa
 class PasteController {
     private static let pasteDelay: TimeInterval = 0.12
 
-    static func copyTextToClipboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+    @discardableResult
+    static func copyTextToClipboard(_ text: String) -> Bool {
+        writeToPasteboard { pasteboard in
+            pasteboard.setString(text, forType: .string)
+        }
     }
     
     /// Copy item content back to system clipboard
-    static func copyToClipboard(_ item: ClipboardItem, store: ClipboardStore) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        
+    @discardableResult
+    static func copyToClipboard(_ item: ClipboardItem, store: ClipboardStore) -> Bool {
         switch item.type {
         case .text:
-            // Use full text from file if file-backed, otherwise use inline content
-            if let text = store.fullText(for: item) {
+            guard let text = store.fullText(for: item) else { return false }
+            return writeToPasteboard { pasteboard in
                 pasteboard.setString(text, forType: .string)
             }
         case .image:
-            if let image = store.image(for: item),
-               let tiffData = image.tiffRepresentation {
+            guard let image = store.image(for: item),
+                  let tiffData = image.tiffRepresentation else {
+                return false
+            }
+            return writeToPasteboard { pasteboard in
                 pasteboard.setData(tiffData, forType: .tiff)
             }
         }
     }
     
     /// Paste item into the frontmost application
+    @discardableResult
     static func paste(
         _ item: ClipboardItem,
         store: ClipboardStore,
         targetApplication: NSRunningApplication? = nil
-    ) {
-        // First copy to clipboard
-        copyToClipboard(item, store: store)
+    ) -> Bool {
+        guard copyToClipboard(item, store: store) else { return false }
 
         prepareAndSimulatePaste(into: targetApplication)
+        return true
     }
     
-    static func paste(text: String, targetApplication: NSRunningApplication? = nil) {
-        copyTextToClipboard(text)
+    @discardableResult
+    static func paste(text: String, targetApplication: NSRunningApplication? = nil) -> Bool {
+        guard copyTextToClipboard(text) else { return false }
 
         prepareAndSimulatePaste(into: targetApplication)
+        return true
+    }
+
+    /// Record only the exact change count from a completed Clippie pasteboard write.
+    private static func writeToPasteboard(_ write: (NSPasteboard) -> Bool) -> Bool {
+        let pasteboard = NSPasteboard.general
+        let changeCount = pasteboard.clearContents()
+        guard write(pasteboard), pasteboard.changeCount == changeCount else { return false }
+
+        NotificationCenter.default.post(
+            name: .bufferDidWritePasteboard,
+            object: NSNumber(value: changeCount)
+        )
+        return true
     }
 
     private static func prepareAndSimulatePaste(into targetApplication: NSRunningApplication?) {

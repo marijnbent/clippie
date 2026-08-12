@@ -57,6 +57,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationWillTerminate(_ notification: Notification) {
         clipboardWatcher?.stopWatching()
+        clipboardWatcher?.finishPendingProcessing()
+        clipboardStore.flushPendingHistorySave()
         hotkeyManager?.unregister()
         snippetExpansionController?.stop()
     }

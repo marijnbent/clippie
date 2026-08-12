@@ -31,6 +31,7 @@ let package = Package(
                 "README.md",
                 "release",
                 "SECURITY.md",
+                "Tests",
                 "scripts",
                 "build_dmg.sh",
                 "todo.md",
@@ -43,6 +44,11 @@ let package = Package(
                 "Services",
                 "Views",
             ]
+        ),
+        .testTarget(
+            name: "ClippieTests",
+            dependencies: ["Clippie"],
+            path: "Tests"
         ),
     ],
     swiftLanguageModes: [
