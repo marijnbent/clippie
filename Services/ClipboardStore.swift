@@ -21,6 +21,29 @@ private struct ClipboardExportItem: Encodable {
     let originalSizeBytes: Int?
 }
 
+struct ClipboardSearchMetrics {
+    var scannedItemCount = 0
+    var inlineTextItemCount = 0
+    var fileBackedItemCount = 0
+    var imageItemCount = 0
+    var fileFullTextChecks = 0
+    var fileCacheHits = 0
+    var fileCacheMisses = 0
+    var fileBytesLoaded = 0
+    var fileLoadMilliseconds = 0.0
+    var normalizationMilliseconds = 0.0
+    var slowestItemMilliseconds = 0.0
+    var slowestItemBytes = 0
+    var slowestItemKind = "none"
+    var activeSearchCountAtStart = 0
+    var scanMilliseconds = 0.0
+}
+
+struct ClipboardSearchScan {
+    let matches: [ClipboardItem]
+    let metrics: ClipboardSearchMetrics
+}
+
 /// Manages persistent storage of clipboard history
 class ClipboardStore: ObservableObject {
     @Published var items: [ClipboardItem] = []
@@ -28,8 +51,10 @@ class ClipboardStore: ObservableObject {
     private let fileManager = FileManager.default
     private let saveQueue = DispatchQueue(label: "com.clippie.save", qos: .utility)
     private let saveStateLock = NSLock()
+    private let searchStateLock = NSLock()
     private var pendingHistorySnapshot: [ClipboardItem]?
     private var isHistorySaveWorkerRunning = false
+    private var activeSearchCount = 0
     private let fullTextCacheQueue = DispatchQueue(
         label: "com.clippie.file-text-cache",
         qos: .userInitiated,
@@ -369,33 +394,135 @@ class ClipboardStore: ObservableObject {
     }
 
     func matchesSearch(_ item: ClipboardItem, normalizedQuery: String) -> Bool {
+        var metrics = ClipboardSearchMetrics()
+        return matchesSearch(
+            item,
+            normalizedQuery: normalizedQuery,
+            metrics: &metrics,
+            collectDiagnostics: false
+        )
+    }
+
+    /// Searches one immutable history snapshot and returns content-free performance measurements.
+    func search(_ items: [ClipboardItem], normalizedQuery: String) -> ClipboardSearchScan {
+        let collectDiagnostics = DiagnosticsLog.shared.isEnabled
+        let scanStart = collectDiagnostics ? ContinuousClock.now : nil
+        var metrics = ClipboardSearchMetrics()
+        if collectDiagnostics {
+            metrics.activeSearchCountAtStart = beginSearch()
+        }
+        defer {
+            if collectDiagnostics {
+                endSearch()
+            }
+        }
+
+        var matches: [ClipboardItem] = []
+        matches.reserveCapacity(min(items.count, 50))
+        var slowestItem: ClipboardItem?
+
+        for item in items {
+            if collectDiagnostics {
+                metrics.scannedItemCount += 1
+                switch item.type {
+                case .text where item.isFileBacked:
+                    metrics.fileBackedItemCount += 1
+                case .text:
+                    metrics.inlineTextItemCount += 1
+                case .image:
+                    metrics.imageItemCount += 1
+                }
+            }
+
+            let itemStart = collectDiagnostics ? ContinuousClock.now : nil
+            if matchesSearch(
+                item,
+                normalizedQuery: normalizedQuery,
+                metrics: &metrics,
+                collectDiagnostics: collectDiagnostics
+            ) {
+                matches.append(item)
+            }
+            if let itemStart {
+                let itemMilliseconds = DiagnosticsLog.elapsedMilliseconds(since: itemStart)
+                if itemMilliseconds > metrics.slowestItemMilliseconds {
+                    metrics.slowestItemMilliseconds = itemMilliseconds
+                    slowestItem = item
+                }
+            }
+        }
+
+        if let slowestItem {
+            metrics.slowestItemBytes = itemSize(for: slowestItem) ?? 0
+            switch slowestItem.type {
+            case .text where slowestItem.isFileBacked:
+                metrics.slowestItemKind = "file_text"
+            case .text:
+                metrics.slowestItemKind = "inline_text"
+            case .image:
+                metrics.slowestItemKind = "image"
+            }
+        }
+        if let scanStart {
+            metrics.scanMilliseconds = DiagnosticsLog.elapsedMilliseconds(since: scanStart)
+        }
+
+        return ClipboardSearchScan(matches: matches, metrics: metrics)
+    }
+
+    private func matchesSearch(
+        _ item: ClipboardItem,
+        normalizedQuery: String,
+        metrics: inout ClipboardSearchMetrics,
+        collectDiagnostics: Bool
+    ) -> Bool {
         guard !normalizedQuery.isEmpty else { return true }
 
-        if Self.normalizeSearchText(item.type.rawValue).contains(normalizedQuery) {
+        if Self.normalizedSearchText(
+            item.type.rawValue,
+            metrics: &metrics,
+            collectDiagnostics: collectDiagnostics
+        ).contains(normalizedQuery) {
             return true
         }
 
         switch item.type {
         case .text:
             if let inlineText = item.textContent,
-               Self.normalizeSearchText(inlineText).contains(normalizedQuery) {
+               Self.normalizedSearchText(
+                   inlineText,
+                   metrics: &metrics,
+                   collectDiagnostics: collectDiagnostics
+               ).contains(normalizedQuery) {
                 return true
             }
 
             if item.isFileBacked,
-               let fullText = normalizedFullTextForSearch(for: item),
+               let fullText = normalizedFullTextForSearch(
+                   for: item,
+                   metrics: &metrics,
+                   collectDiagnostics: collectDiagnostics
+               ),
                fullText.contains(normalizedQuery) {
                 return true
             }
         case .image:
             if let ocrText = item.ocrText,
-               Self.normalizeSearchText(ocrText).contains(normalizedQuery) {
+               Self.normalizedSearchText(
+                   ocrText,
+                   metrics: &metrics,
+                   collectDiagnostics: collectDiagnostics
+               ).contains(normalizedQuery) {
                 return true
             }
         }
 
         if let sourceApp = item.sourceApp,
-           Self.normalizeSearchText(sourceApp).contains(normalizedQuery) {
+           Self.normalizedSearchText(
+               sourceApp,
+               metrics: &metrics,
+               collectDiagnostics: collectDiagnostics
+           ).contains(normalizedQuery) {
             return true
         }
 
@@ -404,6 +531,21 @@ class ClipboardStore: ObservableObject {
 
     static func normalizeSearchText(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private static func normalizedSearchText(
+        _ text: String,
+        metrics: inout ClipboardSearchMetrics,
+        collectDiagnostics: Bool
+    ) -> String {
+        guard collectDiagnostics else {
+            return normalizeSearchText(text)
+        }
+
+        let start = ContinuousClock.now
+        let normalizedText = normalizeSearchText(text)
+        metrics.normalizationMilliseconds += DiagnosticsLog.elapsedMilliseconds(since: start)
+        return normalizedText
     }
     
     /// Load a chunk of text content, reading only what's necessary
@@ -597,24 +739,65 @@ class ClipboardStore: ObservableObject {
         item.type == .image || item.isFileBacked || item.isTruncated
     }
 
-    private func normalizedFullTextForSearch(for item: ClipboardItem) -> String? {
+    private func normalizedFullTextForSearch(
+        for item: ClipboardItem,
+        metrics: inout ClipboardSearchMetrics,
+        collectDiagnostics: Bool
+    ) -> String? {
         guard let filename = item.textFilename else {
-            return item.textContent.map(Self.normalizeSearchText)
+            return item.textContent.map {
+                Self.normalizedSearchText(
+                    $0,
+                    metrics: &metrics,
+                    collectDiagnostics: collectDiagnostics
+                )
+            }
         }
 
+        if collectDiagnostics {
+            metrics.fileFullTextChecks += 1
+        }
         if let cached = cachedSearchText(for: item.id) {
+            if collectDiagnostics {
+                metrics.fileCacheHits += 1
+            }
             return cached
         }
 
+        if collectDiagnostics {
+            metrics.fileCacheMisses += 1
+        }
         do {
+            let loadStart = collectDiagnostics ? ContinuousClock.now : nil
             let text = try loadFullTextFromDisk(filename: filename)
-            let normalizedText = Self.normalizeSearchText(text)
+            if let loadStart {
+                metrics.fileBytesLoaded += itemSize(for: item) ?? 0
+                metrics.fileLoadMilliseconds += DiagnosticsLog.elapsedMilliseconds(since: loadStart)
+            }
+            let normalizedText = Self.normalizedSearchText(
+                text,
+                metrics: &metrics,
+                collectDiagnostics: collectDiagnostics
+            )
             cacheSearchText(normalizedText, for: item.id)
             return normalizedText
         } catch {
             print("[clippie] Failed to load text for search: \(error)")
             return item.textContent.map(Self.normalizeSearchText)
         }
+    }
+
+    private func beginSearch() -> Int {
+        searchStateLock.lock()
+        defer { searchStateLock.unlock() }
+        activeSearchCount += 1
+        return activeSearchCount
+    }
+
+    private func endSearch() {
+        searchStateLock.lock()
+        activeSearchCount -= 1
+        searchStateLock.unlock()
     }
 
     private func cachedSearchText(for id: UUID) -> String? {

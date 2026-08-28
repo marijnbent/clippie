@@ -96,6 +96,7 @@ private struct GlassPanelBackground: View {
 /// Manages the floating history window
 class HistoryWindowController: NSWindowController {
     private let store: ClipboardStore
+    private let diagnostics = DiagnosticsLog.shared
     private var targetApplicationForPaste: NSRunningApplication?
     private var storedStandardFrame: NSRect?
     private var isPresentingImagePreview = false
@@ -216,6 +217,7 @@ class HistoryWindowController: NSWindowController {
     }
     
     override func showWindow(_ sender: Any?) {
+        let showStart = diagnostics.isEnabled ? ContinuousClock.now : nil
         captureCurrentTargetApplication()
         if !isPresentingImagePreview {
             window?.center()
@@ -224,6 +226,21 @@ class HistoryWindowController: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(window?.contentView)
+
+        if let showStart {
+            diagnostics.benchmark(
+                "historyWindow.orderFront",
+                durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: showStart),
+                details: "items=\(self.store.items.count)"
+            )
+            DispatchQueue.main.async { [diagnostics] in
+                diagnostics.benchmark(
+                    "historyWindow.nextRunLoop",
+                    durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: showStart),
+                    details: "items=\(self.store.items.count)"
+                )
+            }
+        }
     }
 
     private func updateImagePreviewPresentation(_ isPresented: Bool) {
@@ -294,6 +311,36 @@ extension Notification.Name {
 private enum HistorySelectionID: Hashable {
     case clipboard(UUID)
     case snippet(UUID)
+}
+
+private struct HistoryNavigationMeasurement {
+    let sequence: Int
+    let triggeredAt: ContinuousClock.Instant
+    let direction: String
+    let isRepeat: Bool
+    let keyIntervalMilliseconds: Double?
+    let selectionID: HistorySelectionID
+    let kind: String
+    let storage: String
+    let contentCharacterCount: Int?
+    let previewCharacterCount: Int
+    var bytes: Int
+    var didRequestScroll = false
+    var didShowSelectedRow = false
+    var didCompletePreview = false
+    var didReachPreviewNextRunLoop = false
+
+    var isComplete: Bool {
+        didShowSelectedRow && didReachPreviewNextRunLoop
+    }
+
+    var stage: String {
+        if didReachPreviewNextRunLoop { return "preview_next_run_loop" }
+        if didCompletePreview { return "preview_ready" }
+        if didShowSelectedRow { return "row_appeared" }
+        if didRequestScroll { return "scroll_requested" }
+        return "selection_changed"
+    }
 }
 
 private enum HistorySearchResult: Identifiable {
@@ -491,9 +538,12 @@ private struct QuickActionRow: View {
 struct HistoryContentView: View {
     private static let initialVisibleClipboardItemLimit = 50
     private static let searchDebounceDelay: DispatchTimeInterval = .milliseconds(70)
+    private static let keyboardPreviewDelayNanoseconds: UInt64 = 300_000_000
+    private static let navigationPreviewCharacterLimit = 300
 
     @ObservedObject var store: ClipboardStore
     @StateObject private var snippetStore = SnippetStore.shared
+    private let diagnostics = DiagnosticsLog.shared
     let onCopyToClipboard: (ClipboardItem) -> Void
     let onPaste: (ClipboardItem) -> Void
     let onCopyText: (String) -> Void
@@ -518,6 +568,11 @@ struct HistoryContentView: View {
     @State private var quickActionError: String?
     @State private var filteredClipboardItems: [ClipboardItem] = []
     @State private var clipboardSearchRevision = 0
+    @State private var navigationSequence = 0
+    @State private var pendingNavigation: HistoryNavigationMeasurement?
+    @State private var previousNavigationKeyAt: ContinuousClock.Instant?
+    @State private var previewSelectionID: HistorySelectionID?
+    @State private var isKeyboardNavigationSelection = false
     
     
     // OCR state
@@ -663,6 +718,9 @@ struct HistoryContentView: View {
             refreshFilteredItems()
         }
         .onChange(of: searchText) { _ in
+            pendingNavigation = nil
+            previousNavigationKeyAt = nil
+            isKeyboardNavigationSelection = false
             resetQuickActionState()
             selectedIndex = 0
             selectedID = nil
@@ -683,6 +741,10 @@ struct HistoryContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .bufferWindowDidOpen)) { _ in
+            pendingNavigation = nil
+            previousNavigationKeyAt = nil
+            previewSelectionID = nil
+            isKeyboardNavigationSelection = false
             resetQuickActionState()
             searchText = ""
             selectedIndex = 0
@@ -693,17 +755,30 @@ struct HistoryContentView: View {
                 isSearchFocused = true
             }
         }
-        .task(id: selectedItem?.id) {
-            // Clear preview
+        .task(id: selectedResult?.id) {
+            let result = selectedResult
+            let selectionID = result?.selectionID
+            let collectDiagnostics = diagnostics.isEnabled
+            let previewStart = collectDiagnostics ? ContinuousClock.now : nil
             resetQuickActionState()
             previewImage = nil
             chunkedText = ChunkedTextState()
             isExtractingText = false
             itemSize = nil
-            
-            // Load new preview async
-            if let item = selectedItem {
+            previewSelectionID = nil
+
+            if isKeyboardNavigationSelection {
+                try? await Task.sleep(nanoseconds: Self.keyboardPreviewDelayNanoseconds)
+                guard !Task.isCancelled else { return }
+            }
+
+            if case .clipboard(let item)? = result {
+                let sizeLookupStart = collectDiagnostics ? ContinuousClock.now : nil
                 itemSize = store.itemSize(for: item)
+                let sizeLookupMilliseconds = sizeLookupStart.map {
+                    DiagnosticsLog.elapsedMilliseconds(since: $0)
+                } ?? 0
+                let loadStart = collectDiagnostics ? ContinuousClock.now : nil
                 
                 if item.type == .image {
                     previewImage = await loadPreviewImage(for: item)
@@ -715,14 +790,61 @@ struct HistoryContentView: View {
                         chunkedText.reachedEOF = true
                     }
                 }
+
+                let loadMilliseconds = loadStart.map {
+                    DiagnosticsLog.elapsedMilliseconds(since: $0)
+                } ?? 0
+                let storage: String
+                if item.type == .image {
+                    storage = "file"
+                } else if item.isFileBacked {
+                    storage = "file"
+                } else if item.isTruncated {
+                    storage = "truncated"
+                } else {
+                    storage = "inline"
+                }
+
+                guard !Task.isCancelled, selectedResult?.selectionID == selectionID else { return }
+                previewSelectionID = selectionID
+
+                if let previewStart {
+                    diagnostics.benchmark(
+                        "historyPreview.ready",
+                        durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: previewStart),
+                        details: "type=\(item.type.rawValue) storage=\(storage) bytes=\(itemSize ?? 0) size_lookup_ms=\(DiagnosticsLog.format(sizeLookupMilliseconds)) load_ms=\(DiagnosticsLog.format(loadMilliseconds)) cancelled=\(Task.isCancelled)"
+                    )
+                    recordNavigationPreviewReady(
+                        selectionID: .clipboard(item.id),
+                        bytes: itemSize ?? 0,
+                        loadMilliseconds: loadMilliseconds
+                    )
+                }
+            } else if case .snippet(let snippet)? = result {
+                let bytes = snippet.content.utf8.count
+                guard !Task.isCancelled, selectedResult?.selectionID == selectionID else { return }
+                previewSelectionID = selectionID
+
+                if let previewStart {
+                    diagnostics.benchmark(
+                        "historyPreview.ready",
+                        durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: previewStart),
+                        details: "type=snippet storage=inline bytes=\(bytes) content_chars=\(snippet.content.count) load_ms=0.00 cancelled=\(Task.isCancelled)"
+                    )
+                    recordNavigationPreviewReady(
+                        selectionID: .snippet(snippet.id),
+                        bytes: bytes,
+                        loadMilliseconds: 0
+                    )
+                }
             }
         }
         .background(GlobalKeyMonitor(
-            onUp: {
-                navigateUp()
+            onUp: { event in
+                navigateUp(event: event)
             },
-            onDown: {
-                navigateDown()
+            onDown: { event in
+                navigateDown(event: event)
             },
             onLeft: {
                 navigateLeft()
@@ -901,6 +1023,12 @@ struct HistoryContentView: View {
                             ForEach(Array(filteredResults.enumerated()), id: \.element.id) { index, result in
                                 resultRow(for: result, isSelected: index == selectedIndex)
                                     .id(result.id)
+                                    .background(
+                                        navigationRowProbe(
+                                            for: result,
+                                            isSelected: index == selectedIndex
+                                        )
+                                    )
                                     .contentShape(Rectangle())
                                     .contextMenu {
                                         resultContextMenu(for: result, index: index)
@@ -912,7 +1040,16 @@ struct HistoryContentView: View {
                     .onChange(of: selectedIndex) { newValue in
                         if scrollTrigger {
                             if let result = filteredResults[safe: newValue] {
-                                proxy.scrollTo(result.id)
+                                if diagnostics.isEnabled {
+                                    let scrollStart = ContinuousClock.now
+                                    proxy.scrollTo(result.id)
+                                    recordNavigationScrollRequested(
+                                        selectionID: result.selectionID,
+                                        scrollCallMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: scrollStart)
+                                    )
+                                } else {
+                                    proxy.scrollTo(result.id)
+                                }
                             }
                             scrollTrigger = false
                         }
@@ -931,16 +1068,15 @@ struct HistoryContentView: View {
     
     private var detailPane: some View {
         Group {
-            if let item = selectedItem {
-                VStack(spacing: 0) {
-                    if detailPaneMode == .quickActions {
-                        quickActionsPane(for: item)
-                    } else if detailPaneMode == .imagePreview {
-                        imagePreviewPane(for: item)
-                    } else {
-                        previewPane(for: item)
-                    }
-                }
+            if let item = selectedItem, detailPaneMode == .quickActions {
+                quickActionsPane(for: item)
+            } else if let item = selectedItem, detailPaneMode == .imagePreview {
+                imagePreviewPane(for: item)
+            } else if let result = selectedResult,
+                      previewSelectionID != result.selectionID {
+                navigationPreview(for: result)
+            } else if let item = selectedItem {
+                previewPane(for: item)
             } else if let snippet = selectedSnippet {
                 ScrollView {
                     snippetContent(snippet)
@@ -960,6 +1096,28 @@ struct HistoryContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    @ViewBuilder
+    private func navigationPreview(for result: HistorySearchResult) -> some View {
+        ScrollView {
+            switch result {
+            case .clipboard(let item) where item.type == .text:
+                Text(String((item.textContent ?? "").prefix(Self.navigationPreviewCharacterLimit)))
+                    .font(.system(size: 14))
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            case .clipboard:
+                Image(systemName: "photo")
+                    .font(.system(size: 28, weight: .ultraLight))
+                    .foregroundColor(.secondary.opacity(0.35))
+                    .frame(maxWidth: .infinity)
+            case .snippet(let snippet):
+                Text(String(snippet.content.prefix(Self.navigationPreviewCharacterLimit)))
+                    .font(.system(size: 13, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .padding(16)
     }
 
     private func previewPane(for item: ClipboardItem) -> some View {
@@ -1332,6 +1490,25 @@ struct HistoryContentView: View {
     }
 
     @ViewBuilder
+    private func navigationRowProbe(
+        for result: HistorySearchResult,
+        isSelected: Bool
+    ) -> some View {
+        if isSelected,
+           let navigation = pendingNavigation,
+           navigation.selectionID == result.selectionID {
+            Color.clear
+                .id("navigation-row-\(navigation.sequence)")
+                .onAppear {
+                    let sequence = navigation.sequence
+                    DispatchQueue.main.async {
+                        recordNavigationRowAppeared(sequence: sequence)
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
     private func resultContextMenu(for result: HistorySearchResult, index: Int) -> some View {
         switch result {
         case .clipboard(let item):
@@ -1606,19 +1783,84 @@ struct HistoryContentView: View {
         }
 
         let items = store.items
+        let collectDiagnostics = diagnostics.isEnabled
+        let requestStart = collectDiagnostics ? ContinuousClock.now : nil
+        let normalizationStart = collectDiagnostics ? ContinuousClock.now : nil
         let normalizedQuery = ClipboardStore.normalizeSearchText(query)
+        let queryNormalizationMilliseconds = normalizationStart.map {
+            DiagnosticsLog.elapsedMilliseconds(since: $0)
+        } ?? 0
+        let queryCharacterCount = query.count
 
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.searchDebounceDelay) {
-            let matches = items.filter { item in
-                store.matchesSearch(item, normalizedQuery: normalizedQuery)
-            }
+            let scan = store.search(items, normalizedQuery: normalizedQuery)
+            let scanFinished = collectDiagnostics ? ContinuousClock.now : nil
 
             DispatchQueue.main.async {
-                guard revision == clipboardSearchRevision else { return }
-                filteredClipboardItems = matches
+                let isCurrent = revision == clipboardSearchRevision
+                guard isCurrent else {
+                    if let requestStart, let scanFinished {
+                        logSearchBenchmark(
+                            scan,
+                            queryCharacterCount: queryCharacterCount,
+                            queryNormalizationMilliseconds: queryNormalizationMilliseconds,
+                            requestStart: requestStart,
+                            scanFinished: scanFinished,
+                            applyMilliseconds: 0,
+                            applied: false
+                        )
+                    }
+                    return
+                }
+
+                let applyStart = collectDiagnostics ? ContinuousClock.now : nil
+                filteredClipboardItems = scan.matches
                 syncSelection()
+                let applyMilliseconds = applyStart.map {
+                    DiagnosticsLog.elapsedMilliseconds(since: $0)
+                } ?? 0
+
+                if let requestStart, let scanFinished {
+                    logSearchBenchmark(
+                        scan,
+                        queryCharacterCount: queryCharacterCount,
+                        queryNormalizationMilliseconds: queryNormalizationMilliseconds,
+                        requestStart: requestStart,
+                        scanFinished: scanFinished,
+                        applyMilliseconds: applyMilliseconds,
+                        applied: true
+                    )
+
+                    DispatchQueue.main.async { [diagnostics] in
+                        diagnostics.benchmark(
+                            "historySearch.nextRunLoop",
+                            durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: requestStart),
+                            details: "query_chars=\(queryCharacterCount) items=\(scan.metrics.scannedItemCount) matches=\(scan.matches.count)"
+                        )
+                    }
+                }
             }
         }
+    }
+
+    private func logSearchBenchmark(
+        _ scan: ClipboardSearchScan,
+        queryCharacterCount: Int,
+        queryNormalizationMilliseconds: Double,
+        requestStart: ContinuousClock.Instant,
+        scanFinished: ContinuousClock.Instant,
+        applyMilliseconds: Double,
+        applied: Bool
+    ) {
+        guard diagnostics.isEnabled else { return }
+        let metrics = scan.metrics
+        let requestToMainMilliseconds = DiagnosticsLog.elapsedMilliseconds(since: requestStart)
+        let resultQueueMilliseconds = DiagnosticsLog.elapsedMilliseconds(since: scanFinished)
+        diagnostics.benchmark(
+            "historySearch.scan",
+            durationMilliseconds: metrics.scanMilliseconds,
+            details: "request_to_main_ms=\(DiagnosticsLog.format(requestToMainMilliseconds)) result_queue_ms=\(DiagnosticsLog.format(resultQueueMilliseconds)) apply_ms=\(DiagnosticsLog.format(applyMilliseconds)) debounce_ms=70 query_normalize_ms=\(DiagnosticsLog.format(queryNormalizationMilliseconds)) query_chars=\(queryCharacterCount) items=\(metrics.scannedItemCount) matches=\(scan.matches.count) applied=\(applied) active_at_start=\(metrics.activeSearchCountAtStart) inline_text=\(metrics.inlineTextItemCount) file_text=\(metrics.fileBackedItemCount) images=\(metrics.imageItemCount) full_text_checks=\(metrics.fileFullTextChecks) cache_hits=\(metrics.fileCacheHits) cache_misses=\(metrics.fileCacheMisses) file_bytes_loaded=\(metrics.fileBytesLoaded) file_load_ms=\(DiagnosticsLog.format(metrics.fileLoadMilliseconds)) normalize_ms=\(DiagnosticsLog.format(metrics.normalizationMilliseconds)) slowest_item_ms=\(DiagnosticsLog.format(metrics.slowestItemMilliseconds)) slowest_item_bytes=\(metrics.slowestItemBytes) slowest_item_kind=\(metrics.slowestItemKind)"
+        )
     }
 
     private func prepareSnippetDraft(for item: ClipboardItem) {
@@ -1758,6 +2000,9 @@ struct HistoryContentView: View {
     }
 
     private func selectResult(at index: Int) {
+        pendingNavigation = nil
+        previousNavigationKeyAt = nil
+        isKeyboardNavigationSelection = false
         selectedIndex = index
         selectedID = filteredResults[safe: index]?.selectionID
     }
@@ -1923,7 +2168,198 @@ struct HistoryContentView: View {
             .padding(.vertical, 6)
     }
     
-    private func navigateUp() {
+    private func beginNavigation(
+        to targetIndex: Int,
+        direction: String,
+        event: NavigationKeyEvent
+    ) {
+        guard let result = filteredResults[safe: targetIndex] else { return }
+
+        isKeyboardNavigationSelection = true
+        scrollTrigger = true
+
+        guard diagnostics.isEnabled else {
+            pendingNavigation = nil
+            previousNavigationKeyAt = nil
+            selectedIndex = targetIndex
+            return
+        }
+
+        if let previous = pendingNavigation, !previous.isComplete {
+            diagnostics.benchmark(
+                "historyNavigation.superseded",
+                durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: previous.triggeredAt),
+                details: navigationDetails(previous)
+            )
+        }
+
+        let keyIntervalMilliseconds = event.isRepeat
+            ? previousNavigationKeyAt.map { DiagnosticsLog.elapsedMilliseconds(since: $0) }
+            : nil
+        previousNavigationKeyAt = event.triggeredAt
+        navigationSequence += 1
+
+        var navigation = navigationMeasurement(
+            for: result,
+            sequence: navigationSequence,
+            direction: direction,
+            event: event,
+            keyIntervalMilliseconds: keyIntervalMilliseconds
+        )
+        pendingNavigation = navigation
+        selectedIndex = targetIndex
+
+        navigation = pendingNavigation ?? navigation
+        diagnostics.benchmark(
+            "historyNavigation.selectionChanged",
+            durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: event.triggeredAt),
+            details: navigationDetails(navigation)
+        )
+    }
+
+    private func navigationMeasurement(
+        for result: HistorySearchResult,
+        sequence: Int,
+        direction: String,
+        event: NavigationKeyEvent,
+        keyIntervalMilliseconds: Double?
+    ) -> HistoryNavigationMeasurement {
+        switch result {
+        case .clipboard(let item):
+            let contentCharacterCount: Int?
+            let previewCharacterCount = item.textContent?.count ?? 0
+            let bytes: Int
+            let kind: String
+            let storage: String
+
+            switch item.type {
+            case .text:
+                kind = "clipboard_text"
+                if item.isFileBacked {
+                    storage = "file"
+                    contentCharacterCount = nil
+                } else if item.isTruncated {
+                    storage = "truncated"
+                    contentCharacterCount = nil
+                } else {
+                    storage = "inline"
+                    contentCharacterCount = item.textContent?.count ?? 0
+                }
+                bytes = item.originalSizeBytes ?? item.textContent?.utf8.count ?? 0
+            case .image:
+                kind = "clipboard_image"
+                storage = "file"
+                contentCharacterCount = item.ocrText?.count
+                bytes = item.originalSizeBytes ?? 0
+            }
+
+            return HistoryNavigationMeasurement(
+                sequence: sequence,
+                triggeredAt: event.triggeredAt,
+                direction: direction,
+                isRepeat: event.isRepeat,
+                keyIntervalMilliseconds: keyIntervalMilliseconds,
+                selectionID: .clipboard(item.id),
+                kind: kind,
+                storage: storage,
+                contentCharacterCount: contentCharacterCount,
+                previewCharacterCount: previewCharacterCount,
+                bytes: bytes
+            )
+        case .snippet(let snippet):
+            return HistoryNavigationMeasurement(
+                sequence: sequence,
+                triggeredAt: event.triggeredAt,
+                direction: direction,
+                isRepeat: event.isRepeat,
+                keyIntervalMilliseconds: keyIntervalMilliseconds,
+                selectionID: .snippet(snippet.id),
+                kind: "snippet",
+                storage: "inline",
+                contentCharacterCount: snippet.content.count,
+                previewCharacterCount: snippet.content.count,
+                bytes: snippet.content.utf8.count
+            )
+        }
+    }
+
+    private func recordNavigationScrollRequested(
+        selectionID: HistorySelectionID,
+        scrollCallMilliseconds: Double
+    ) {
+        guard diagnostics.isEnabled else { return }
+        guard var navigation = pendingNavigation,
+              navigation.selectionID == selectionID,
+              !navigation.didRequestScroll else { return }
+
+        navigation.didRequestScroll = true
+        pendingNavigation = navigation
+        diagnostics.benchmark(
+            "historyNavigation.scrollRequested",
+            durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: navigation.triggeredAt),
+            details: "\(navigationDetails(navigation)) scroll_call_ms=\(DiagnosticsLog.format(scrollCallMilliseconds))"
+        )
+    }
+
+    private func recordNavigationRowAppeared(sequence: Int) {
+        guard diagnostics.isEnabled else { return }
+        guard var navigation = pendingNavigation,
+              navigation.sequence == sequence,
+              !navigation.didShowSelectedRow else { return }
+
+        navigation.didShowSelectedRow = true
+        pendingNavigation = navigation
+        diagnostics.benchmark(
+            "historyNavigation.selectedRowAppeared",
+            durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: navigation.triggeredAt),
+            details: navigationDetails(navigation)
+        )
+    }
+
+    private func recordNavigationPreviewReady(
+        selectionID: HistorySelectionID,
+        bytes: Int,
+        loadMilliseconds: Double
+    ) {
+        guard diagnostics.isEnabled else { return }
+        guard var navigation = pendingNavigation,
+              navigation.selectionID == selectionID,
+              !navigation.didCompletePreview else { return }
+
+        if bytes > 0 {
+            navigation.bytes = bytes
+        }
+        navigation.didCompletePreview = true
+        pendingNavigation = navigation
+        diagnostics.benchmark(
+            "historyNavigation.previewReady",
+            durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: navigation.triggeredAt),
+            details: "\(navigationDetails(navigation)) load_ms=\(DiagnosticsLog.format(loadMilliseconds))"
+        )
+
+        let sequence = navigation.sequence
+        DispatchQueue.main.async {
+            guard var current = pendingNavigation,
+                  current.sequence == sequence,
+                  !current.didReachPreviewNextRunLoop else { return }
+
+            current.didReachPreviewNextRunLoop = true
+            pendingNavigation = current
+            diagnostics.benchmark(
+                "historyNavigation.previewNextRunLoop",
+                durationMilliseconds: DiagnosticsLog.elapsedMilliseconds(since: current.triggeredAt),
+                details: navigationDetails(current)
+            )
+        }
+    }
+
+    private func navigationDetails(_ navigation: HistoryNavigationMeasurement) -> String {
+        let keyInterval = navigation.keyIntervalMilliseconds.map { DiagnosticsLog.format($0) } ?? "none"
+        let contentCharacters = navigation.contentCharacterCount.map { String($0) } ?? "unknown"
+        return "sequence=\(navigation.sequence) direction=\(navigation.direction) repeat=\(navigation.isRepeat) key_interval_ms=\(keyInterval) kind=\(navigation.kind) storage=\(navigation.storage) bytes=\(navigation.bytes) content_chars=\(contentCharacters) preview_chars=\(navigation.previewCharacterCount) stage=\(navigation.stage)"
+    }
+
+    private func navigateUp(event: NavigationKeyEvent) {
         if detailPaneMode == .imagePreview {
             return
         }
@@ -1941,12 +2377,11 @@ struct HistoryContentView: View {
         }
 
         if selectedIndex > 0 {
-            scrollTrigger = true
-            selectedIndex -= 1
+            beginNavigation(to: selectedIndex - 1, direction: "up", event: event)
         }
     }
     
-    private func navigateDown() {
+    private func navigateDown(event: NavigationKeyEvent) {
         if detailPaneMode == .imagePreview {
             return
         }
@@ -1967,8 +2402,7 @@ struct HistoryContentView: View {
         }
 
         if selectedIndex < filteredResults.count - 1 {
-            scrollTrigger = true
-            selectedIndex += 1
+            beginNavigation(to: selectedIndex + 1, direction: "down", event: event)
         }
     }
 
@@ -2056,9 +2490,14 @@ private enum QuickActionFocusedField: Hashable {
 }
 
 /// Monitors global key events for the window
-struct GlobalKeyMonitor: NSViewRepresentable {
-    let onUp: () -> Void
-    let onDown: () -> Void
+private struct NavigationKeyEvent {
+    let triggeredAt: ContinuousClock.Instant
+    let isRepeat: Bool
+}
+
+private struct GlobalKeyMonitor: NSViewRepresentable {
+    let onUp: (NavigationKeyEvent) -> Void
+    let onDown: (NavigationKeyEvent) -> Void
     let onLeft: () -> Void
     let onRight: () -> Void
     let onEnter: () -> Void
@@ -2080,10 +2519,10 @@ struct GlobalKeyMonitor: NSViewRepresentable {
             let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 switch event.keyCode {
                 case 126: // Up
-                    onUp()
+                    onUp(NavigationKeyEvent(triggeredAt: .now, isRepeat: event.isARepeat))
                     return nil // Consume event
                 case 125: // Down
-                    onDown()
+                    onDown(NavigationKeyEvent(triggeredAt: .now, isRepeat: event.isARepeat))
                     return nil // Consume event
                 case 123: // Left
                     onLeft()

@@ -8,7 +8,6 @@ struct SettingsView: View {
     @StateObject private var settings = SettingsViewModel()
     @StateObject private var snippetStore = SnippetStore.shared
     @StateObject private var accessibilityPermission = AccessibilityPermissionViewModel()
-    @StateObject private var inputMonitoringPermission = InputMonitoringPermissionViewModel()
     @State private var isRecording = false
     @State private var recordedKeyCode: UInt16 = 0
     @State private var recordedModifiers = HotkeyModifiers()
@@ -76,11 +75,9 @@ struct SettingsView: View {
         })
         .onAppear {
             accessibilityPermission.refresh()
-            inputMonitoringPermission.refresh()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityPermission.refresh()
-            inputMonitoringPermission.refresh()
         }
         .frame(
             minWidth: ClippieSettingsWindowMetrics.width,
@@ -118,7 +115,6 @@ struct SettingsView: View {
         Group {
             Section {
                 accessibilityPermissionRow
-                inputMonitoringPermissionRow
             } header: {
                 Text("Permissions")
             }
@@ -167,6 +163,17 @@ struct SettingsView: View {
                 Text("History")
             } footer: {
                 Text("Remove large clips or delete the entire clipboard history.")
+            }
+
+            Section {
+                Toggle("Record Performance Diagnostics", isOn: $settings.diagnosticsEnabled)
+                    .onChange(of: settings.diagnosticsEnabled) { _ in
+                        settings.save()
+                    }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("Record performance timings in the Diagnostics log. Keep this off during normal use.")
             }
 
             Section {
@@ -240,31 +247,6 @@ struct SettingsView: View {
         }
     }
 
-    private var inputMonitoringPermissionRow: some View {
-        LabeledContent {
-            Button(inputMonitoringPermission.isTrusted ? "Open Settings" : "Request") {
-                if inputMonitoringPermission.isTrusted {
-                    inputMonitoringPermission.openSystemSettings()
-                } else {
-                    inputMonitoringPermission.requestAccess()
-                }
-            }
-        } label: {
-            Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Input Monitoring")
-                    Text(inputMonitoringPermission.isTrusted ? "Granted" : "Not granted")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } icon: {
-                Circle()
-                    .fill(inputMonitoringPermission.isTrusted ? Color.green : Color.orange)
-                    .frame(width: 8, height: 8)
-            }
-        }
-    }
-    
     private var snippetsSection: some View {
         Section {
             if snippetStore.snippets.isEmpty {
@@ -435,18 +417,21 @@ class SettingsViewModel: ObservableObject {
     @Published var hotkeyKeyCode: UInt16
     @Published var launchAtLogin: Bool
     @Published var historyLimit: HistoryLimit
+    @Published var diagnosticsEnabled: Bool
     
     init() {
         self.hotkeyModifiers = SettingsManager.shared.hotkeyModifiers
         self.hotkeyKeyCode = SettingsManager.shared.hotkeyKeyCode
         self.launchAtLogin = SettingsManager.shared.launchAtLogin
         self.historyLimit = SettingsManager.shared.historyLimit
+        self.diagnosticsEnabled = SettingsManager.shared.diagnosticsEnabled
     }
     
     func save() {
         SettingsManager.shared.hotkeyModifiers = hotkeyModifiers
         SettingsManager.shared.hotkeyKeyCode = hotkeyKeyCode
         SettingsManager.shared.historyLimit = historyLimit
+        SettingsManager.shared.diagnosticsEnabled = diagnosticsEnabled
         SettingsManager.shared.save()
         
         NotificationCenter.default.post(name: .bufferHotkeyChanged, object: nil)
@@ -484,31 +469,6 @@ final class AccessibilityPermissionViewModel: ObservableObject {
             return
         }
         
-        NSWorkspace.shared.open(url)
-    }
-}
-
-@MainActor
-final class InputMonitoringPermissionViewModel: ObservableObject {
-    @Published private(set) var isTrusted = CGPreflightListenEventAccess()
-
-    func refresh() {
-        isTrusted = CGPreflightListenEventAccess()
-    }
-
-    func requestAccess() {
-        isTrusted = CGRequestListenEventAccess()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
-            self?.refresh()
-        }
-    }
-
-    func openSystemSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
-            return
-        }
-
         NSWorkspace.shared.open(url)
     }
 }

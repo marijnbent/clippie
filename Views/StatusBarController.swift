@@ -52,6 +52,15 @@ class StatusBarController {
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+
+        let diagnosticsItem = NSMenuItem(
+            title: "Reveal Diagnostics Log",
+            action: #selector(revealDiagnosticsLog),
+            keyEquivalent: ""
+        )
+        diagnosticsItem.target = self
+        diagnosticsItem.isEnabled = settings.diagnosticsEnabled
+        menu.addItem(diagnosticsItem)
         
         menu.addItem(NSMenuItem.separator())
         
@@ -67,6 +76,13 @@ class StatusBarController {
     
     @objc private func showSettings() {
         onShowSettings()
+    }
+
+    @objc private func revealDiagnosticsLog() {
+        let diagnostics = DiagnosticsLog.shared
+        diagnostics.ensureFileExists()
+        diagnostics.event("diagnosticsLog.revealed")
+        NSWorkspace.shared.activateFileViewerSelecting([diagnostics.fileURL])
     }
     
     @objc private func quit() {

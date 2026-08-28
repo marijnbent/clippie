@@ -215,6 +215,7 @@ class ClipboardWatcher: ObservableObject {
             item = .largeText(
                 preview: String(text.prefix(previewLength)),
                 filename: filename,
+                originalSizeBytes: utf8Data.count,
                 sourceApp: sourceApp,
                 sourceBundleIdentifier: sourceBundleIdentifier
             )

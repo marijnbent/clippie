@@ -78,6 +78,7 @@ class SettingsManager: ObservableObject {
     @Published var hotkeyKeyCode: UInt16
     @Published var launchAtLogin: Bool = false
     @Published var historyLimit: HistoryLimit = .defaultValue
+    @Published var diagnosticsEnabled: Bool = false
     
     private init() {
         // Load saved modifiers or use default
@@ -99,12 +100,16 @@ class SettingsManager: ObservableObject {
         // Load history limit
         let rawLimit = defaults.integer(forKey: "historyLimit")
         self.historyLimit = HistoryLimit.fromStoredValue(rawLimit) ?? .defaultValue
+
+        self.diagnosticsEnabled = defaults.bool(forKey: DiagnosticsLog.enabledDefaultsKey)
     }
     
     func save() {
         defaults.set(hotkeyModifiers.toArray(), forKey: hotkeyModifiersKey)
         defaults.set(Int(hotkeyKeyCode), forKey: hotkeyKeyCodeKey)
         defaults.set(historyLimit.rawValue, forKey: "historyLimit")
+        defaults.set(diagnosticsEnabled, forKey: DiagnosticsLog.enabledDefaultsKey)
+        DiagnosticsLog.shared.setEnabled(diagnosticsEnabled)
     }
     
     func toggleLaunchAtLogin(_ enabled: Bool) {

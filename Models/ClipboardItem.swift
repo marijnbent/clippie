@@ -62,13 +62,20 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     }
     
     /// Create a large text clipboard item (file-backed with inline preview)
-    static func largeText(preview: String, filename: String, sourceApp: String? = nil, sourceBundleIdentifier: String? = nil) -> ClipboardItem {
+    static func largeText(
+        preview: String,
+        filename: String,
+        originalSizeBytes: Int,
+        sourceApp: String? = nil,
+        sourceBundleIdentifier: String? = nil
+    ) -> ClipboardItem {
         ClipboardItem(
             type: .text,
             sourceApp: sourceApp,
             sourceBundleIdentifier: sourceBundleIdentifier,
             textContent: preview,
-            textFilename: filename
+            textFilename: filename,
+            originalSizeBytes: originalSizeBytes
         )
     }
     
