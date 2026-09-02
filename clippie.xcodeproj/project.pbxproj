@@ -18,14 +18,12 @@
 		AAA00009 /* ClipboardListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00009 /* ClipboardListView.swift */; };
 		AAA00010 /* ClipboardItemRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00010 /* ClipboardItemRow.swift */; };
 		AAA00011 /* SearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00011 /* SearchField.swift */; };
-		AAA00012 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00012 /* StatusBarController.swift */; };
 		AAA00013 /* SettingsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00015 /* SettingsManager.swift */; };
 		AAA00014 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00016 /* SettingsView.swift */; };
 		AAA00015 /* OCRService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00017 /* OCRService.swift */; };
 		AAA00016 /* Snippet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00018 /* Snippet.swift */; };
 		AAA00017 /* SnippetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00019 /* SnippetStore.swift */; };
 		AAA00018 /* SnippetExpansionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00020 /* SnippetExpansionController.swift */; };
-		AAA00019 /* AppMenuBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00021 /* AppMenuBuilder.swift */; };
 		AAA00020 /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00022 /* SettingsWindowController.swift */; };
 /* End PBXBuildFile section */
 
@@ -42,7 +40,6 @@
 		BBB00009 /* ClipboardListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardListView.swift; sourceTree = "<group>"; };
 		BBB00010 /* ClipboardItemRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardItemRow.swift; sourceTree = "<group>"; };
 		BBB00011 /* SearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchField.swift; sourceTree = "<group>"; };
-		BBB00012 /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
 		BBB00013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BBB00014 /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = release/App.entitlements; sourceTree = "<group>"; };
 		BBB00015 /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
@@ -51,7 +48,6 @@
 		BBB00018 /* Snippet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snippet.swift; sourceTree = "<group>"; };
 		BBB00019 /* SnippetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnippetStore.swift; sourceTree = "<group>"; };
 		BBB00020 /* SnippetExpansionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnippetExpansionController.swift; sourceTree = "<group>"; };
-		BBB00021 /* AppMenuBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMenuBuilder.swift; sourceTree = "<group>"; };
 		BBB00022 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -79,7 +75,6 @@
 			children = (
 				BBB00001 /* ClippieApp.swift */,
 				BBB00002 /* AppDelegate.swift */,
-				BBB00021 /* AppMenuBuilder.swift */,
 				DDD00002 /* Models */,
 				DDD00003 /* Services */,
 				DDD00004 /* Views */,
@@ -121,7 +116,6 @@
 				BBB00009 /* ClipboardListView.swift */,
 				BBB00010 /* ClipboardItemRow.swift */,
 				BBB00011 /* SearchField.swift */,
-				BBB00012 /* StatusBarController.swift */,
 				BBB00016 /* SettingsView.swift */,
 				BBB00022 /* SettingsWindowController.swift */,
 			);
@@ -215,14 +209,12 @@
 				AAA00009 /* ClipboardListView.swift in Sources */,
 				AAA00010 /* ClipboardItemRow.swift in Sources */,
 				AAA00011 /* SearchField.swift in Sources */,
-				AAA00012 /* StatusBarController.swift in Sources */,
 				AAA00013 /* SettingsManager.swift in Sources */,
 				AAA00014 /* SettingsView.swift in Sources */,
 				AAA00015 /* OCRService.swift in Sources */,
 				AAA00016 /* Snippet.swift in Sources */,
 				AAA00017 /* SnippetStore.swift in Sources */,
 				AAA00018 /* SnippetExpansionController.swift in Sources */,
-				AAA00019 /* AppMenuBuilder.swift in Sources */,
 				AAA00020 /* SettingsWindowController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

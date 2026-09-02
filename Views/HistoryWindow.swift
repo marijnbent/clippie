@@ -30,6 +30,14 @@ private struct ChunkedTextState {
     }
 }
 
+enum HistoryPreviewLoadingPolicy {
+    static let immediateTextCharacterLimit = 1_000
+
+    static func shouldDeferFullTextPreview(characterCount: Int, isFileBacked: Bool) -> Bool {
+        isFileBacked || characterCount > immediateTextCharacterLimit
+    }
+}
+
 private struct VisualEffectBackdropView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
@@ -539,7 +547,6 @@ struct HistoryContentView: View {
     private static let initialVisibleClipboardItemLimit = 50
     private static let searchDebounceDelay: DispatchTimeInterval = .milliseconds(70)
     private static let keyboardPreviewDelayNanoseconds: UInt64 = 300_000_000
-    private static let navigationPreviewCharacterLimit = 300
 
     @ObservedObject var store: ClipboardStore
     @StateObject private var snippetStore = SnippetStore.shared
@@ -767,7 +774,7 @@ struct HistoryContentView: View {
             itemSize = nil
             previewSelectionID = nil
 
-            if isKeyboardNavigationSelection {
+            if isKeyboardNavigationSelection, shouldDeferFullPreview(for: result) {
                 try? await Task.sleep(nanoseconds: Self.keyboardPreviewDelayNanoseconds)
                 guard !Task.isCancelled else { return }
             }
@@ -1072,17 +1079,10 @@ struct HistoryContentView: View {
                 quickActionsPane(for: item)
             } else if let item = selectedItem, detailPaneMode == .imagePreview {
                 imagePreviewPane(for: item)
-            } else if let result = selectedResult,
-                      previewSelectionID != result.selectionID {
-                navigationPreview(for: result)
             } else if let item = selectedItem {
                 previewPane(for: item)
             } else if let snippet = selectedSnippet {
-                ScrollView {
-                    snippetContent(snippet)
-                        .padding(16)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
+                snippetPreviewPane(for: snippet)
             } else {
                 // Empty detail state — give it some visual presence
                 VStack(spacing: 8) {
@@ -1098,32 +1098,71 @@ struct HistoryContentView: View {
         }
     }
 
-    @ViewBuilder
-    private func navigationPreview(for result: HistorySearchResult) -> some View {
-        ScrollView {
-            switch result {
-            case .clipboard(let item) where item.type == .text:
-                Text(String((item.textContent ?? "").prefix(Self.navigationPreviewCharacterLimit)))
-                    .font(.system(size: 14))
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            case .clipboard:
+    private func shouldDeferFullPreview(for result: HistorySearchResult?) -> Bool {
+        switch result {
+        case .clipboard(let item) where item.type == .text:
+            return HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(
+                characterCount: item.textContent?.count ?? 0,
+                isFileBacked: item.isFileBacked
+            )
+        case .snippet(let snippet):
+            return HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(
+                characterCount: snippet.content.count,
+                isFileBacked: false
+            )
+        case .clipboard, nil:
+            return false
+        }
+    }
+
+    private func previewPane(for item: ClipboardItem) -> some View {
+        clipboardPreviewLayout(for: item) {
+            if previewSelectionID != .clipboard(item.id), item.type == .image {
                 Image(systemName: "photo")
                     .font(.system(size: 28, weight: .ultraLight))
                     .foregroundColor(.secondary.opacity(0.35))
                     .frame(maxWidth: .infinity)
-            case .snippet(let snippet):
-                Text(String(snippet.content.prefix(Self.navigationPreviewCharacterLimit)))
+            } else if previewSelectionID != .clipboard(item.id),
+                      HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(
+                          characterCount: item.textContent?.count ?? 0,
+                          isFileBacked: item.isFileBacked
+                      ) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String((item.textContent ?? "").prefix(HistoryPreviewLoadingPolicy.immediateTextCharacterLimit)))
+                        .font(.system(size: 14))
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            } else {
+                itemContent(item)
+            }
+        }
+    }
+
+    private func snippetPreviewPane(for snippet: Snippet) -> some View {
+        ScrollView {
+            if previewSelectionID != .snippet(snippet.id),
+               HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(
+                   characterCount: snippet.content.count,
+                   isFileBacked: false
+               ) {
+                Text(String(snippet.content.prefix(HistoryPreviewLoadingPolicy.immediateTextCharacterLimit)))
                     .font(.system(size: 13, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+            } else {
+                snippetContent(snippet)
             }
         }
         .padding(16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func previewPane(for item: ClipboardItem) -> some View {
+    private func clipboardPreviewLayout<Content: View>(
+        for item: ClipboardItem,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         VStack(spacing: 0) {
             ScrollView {
-                itemContent(item)
+                content()
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                     .padding(.bottom, 16)
@@ -1136,7 +1175,7 @@ struct HistoryContentView: View {
                 if !item.isFileBacked, let text = item.textContent, !text.isEmpty {
                     let words = text.split(whereSeparator: \.isWhitespace).count
                     Text("\(words) words · \(text.count) chars")
-                } else if let size = itemSize, size > 0 {
+                } else if let size = itemSize ?? item.originalSizeBytes, size > 0 {
                     Text(formattedByteCount(size))
                 }
                 Spacer()
@@ -2550,8 +2589,11 @@ private struct GlobalKeyMonitor: NSViewRepresentable {
                     return event
                 case 8: // C (for Copy)
                     if event.modifierFlags.contains(.command) {
-                        // If text is selected in a text view, let the system handle native copy
-                        if let responder = view.window?.firstResponder, responder is NSTextView {
+                        if NSApp.target(
+                            forAction: #selector(NSText.copy(_:)),
+                            to: nil,
+                            from: view
+                        ) != nil {
                             return event
                         }
                         onCopy()

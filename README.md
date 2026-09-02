@@ -123,8 +123,7 @@ clippie/
     ├── HistoryWindow.swift      # Main history window
     ├── ClipboardListView.swift  # List of clipboard items
     ├── ClipboardItemRow.swift   # Individual item row
-    ├── SearchField.swift        # Search component
-    └── StatusBarController.swift # Menu bar controller
+    └── SearchField.swift        # Search component
 ```
 
 ---

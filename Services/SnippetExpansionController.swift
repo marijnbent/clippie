@@ -2,13 +2,28 @@ import Cocoa
 import SwiftUI
 import ApplicationServices
 
+enum SnippetExpansionPolicy {
+    static func shouldAutoExpand(_ exactMatch: Snippet, among matches: [Snippet]) -> Bool {
+        !matches.contains { snippet in
+            snippet.id != exactMatch.id && snippet.trigger.hasPrefix(exactMatch.trigger)
+        }
+    }
+}
+
 @MainActor
 final class SnippetExpansionController {
     private static let maximumVisibleSuggestions = 3
 
     private let generatedEventMarker: Int64 = 0x425546464552
     private let store: SnippetStore
-    private let suggestionWindowController = SnippetSuggestionWindowController()
+    private lazy var suggestionWindowController = SnippetSuggestionWindowController(
+        onSelectSnippet: { [weak self] snippet in
+            self?.expand(snippet)
+        },
+        onHoverSuggestion: { [weak self] index in
+            self?.selectSuggestion(at: index)
+        }
+    )
     
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -220,12 +235,15 @@ final class SnippetExpansionController {
 
         ensureObservationTargetCurrent()
         
-        if let exactMatch = exactMatch(for: activeQuery) {
+        let allMatches = store.expansionMatches(for: activeQuery)
+
+        if let exactMatch = exactMatch(for: activeQuery),
+           SnippetExpansionPolicy.shouldAutoExpand(exactMatch, among: allMatches) {
             expand(exactMatch)
             return
         }
 
-        matches = store.expansionMatches(for: activeQuery, limit: Self.maximumVisibleSuggestions)
+        matches = Array(allMatches.prefix(Self.maximumVisibleSuggestions))
         if selectedIndex >= matches.count {
             selectedIndex = max(0, matches.count - 1)
         }
@@ -269,6 +287,13 @@ final class SnippetExpansionController {
     private var selectedSnippet: Snippet? {
         guard matches.indices.contains(selectedIndex) else { return nil }
         return matches[selectedIndex]
+    }
+
+    private func selectSuggestion(at index: Int) {
+        guard matches.indices.contains(index), selectedIndex != index else { return }
+        selectedIndex = index
+        hasNavigatedSuggestions = true
+        suggestionWindowController.update(snippets: matches, selectedIndex: selectedIndex)
     }
 
     private func startSession() {
@@ -999,9 +1024,25 @@ private enum AccessibilityActivationMode: String {
 
 @MainActor
 private final class SnippetSuggestionWindowController: NSWindowController {
-    private let hostingView = NSHostingView(rootView: SnippetSuggestionListView(snippets: [], selectedIndex: 0))
+    private let hostingView: NSHostingView<SnippetSuggestionListView>
+    private let onSelectSnippet: (Snippet) -> Void
+    private let onHoverSuggestion: (Int) -> Void
     
-    init() {
+    init(
+        onSelectSnippet: @escaping (Snippet) -> Void,
+        onHoverSuggestion: @escaping (Int) -> Void
+    ) {
+        self.onSelectSnippet = onSelectSnippet
+        self.onHoverSuggestion = onHoverSuggestion
+        hostingView = NSHostingView(
+            rootView: SnippetSuggestionListView(
+                snippets: [],
+                selectedIndex: 0,
+                onSelectSnippet: onSelectSnippet,
+                onHoverSuggestion: onHoverSuggestion
+            )
+        )
+
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 280, height: 80),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -1016,7 +1057,16 @@ private final class SnippetSuggestionWindowController: NSWindowController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.isOpaque = false
-        panel.contentView = hostingView
+
+        if #available(macOS 26.0, *), !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+            let glassView = NSGlassEffectView()
+            glassView.style = .clear
+            glassView.cornerRadius = 16
+            glassView.contentView = hostingView
+            panel.contentView = glassView
+        } else {
+            panel.contentView = hostingView
+        }
         
         super.init(window: panel)
     }
@@ -1030,12 +1080,12 @@ private final class SnippetSuggestionWindowController: NSWindowController {
     }
     
     func show(snippets: [Snippet], selectedIndex: Int, anchorRect: CGRect, anchorStrategy: AnchorStrategy) {
-        hostingView.rootView = SnippetSuggestionListView(snippets: snippets, selectedIndex: selectedIndex)
+        update(snippets: snippets, selectedIndex: selectedIndex)
         
-        let width: CGFloat = 300
-        let rowHeight: CGFloat = 44
-        let padding: CGFloat = 14
-        let height = CGFloat(snippets.count) * rowHeight + padding
+        let width: CGFloat = 340
+        let rowHeight: CGFloat = 50
+        let chromeHeight: CGFloat = 12
+        let height = CGFloat(snippets.count) * rowHeight + chromeHeight
         let contentRect = NSRect(x: 0, y: 0, width: width, height: height)
         
         window?.setContentSize(contentRect.size)
@@ -1047,6 +1097,15 @@ private final class SnippetSuggestionWindowController: NSWindowController {
         )
         window?.setFrameOrigin(preferredOrigin)
         window?.orderFrontRegardless()
+    }
+
+    func update(snippets: [Snippet], selectedIndex: Int) {
+        hostingView.rootView = SnippetSuggestionListView(
+            snippets: snippets,
+            selectedIndex: selectedIndex,
+            onSelectSnippet: onSelectSnippet,
+            onHoverSuggestion: onHoverSuggestion
+        )
     }
     
     func hide() {
@@ -1093,40 +1152,71 @@ private final class SnippetSuggestionWindowController: NSWindowController {
 private struct SnippetSuggestionListView: View {
     let snippets: [Snippet]
     let selectedIndex: Int
+    let onSelectSnippet: (Snippet) -> Void
+    let onHoverSuggestion: (Int) -> Void
+
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
     
     var body: some View {
+        content
+            .background { background }
+            .clipShape(shape)
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             ForEach(Array(snippets.enumerated()), id: \.element.id) { index, snippet in
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(snippet.content)
-                            .font(.system(size: 12))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-
-                        Text(":\(snippet.trigger)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
-                    
-                    Spacer(minLength: 8)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(index == selectedIndex ? Color.accentColor.opacity(0.18) : Color.clear)
-                )
+                suggestionRow(snippet, index: index)
             }
         }
-        .padding(7)
-        .background(.ultraThinMaterial)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        .padding(6)
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        if reduceTransparency {
+            shape.fill(Color(nsColor: .windowBackgroundColor))
+        } else if #available(macOS 26.0, *) {
+            Color.clear
+        } else {
+            shape.fill(.ultraThinMaterial)
+        }
+    }
+
+    private func suggestionRow(_ snippet: Snippet, index: Int) -> some View {
+        let isSelected = index == selectedIndex
+
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(":\(snippet.trigger)")
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+
+                Text(snippet.content.replacingOccurrences(of: "\n", with: " "))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 50)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isSelected ? Color.accentColor.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .contentShape(Rectangle())
+        .onHover { isHovering in
+            if isHovering {
+                onHoverSuggestion(index)
+            }
+        }
+        .onTapGesture {
+            onSelectSnippet(snippet)
+        }
     }
 }

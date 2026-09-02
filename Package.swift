@@ -39,7 +39,6 @@ let package = Package(
             sources: [
                 "ClippieApp.swift",
                 "AppDelegate.swift",
-                "AppMenuBuilder.swift",
                 "Models",
                 "Services",
                 "Views",

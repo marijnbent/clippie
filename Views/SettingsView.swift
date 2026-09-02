@@ -1,6 +1,5 @@
 import SwiftUI
 import ApplicationServices
-import UniformTypeIdentifiers
 
 /// Settings view for configuring clippie preferences
 struct SettingsView: View {
@@ -570,22 +569,6 @@ private struct SnippetEditorSheet: View {
         .onAppear {
             DispatchQueue.main.async {
                 focusedField = .trigger
-            }
-        }
-        .onPasteCommand(of: [UTType.plainText]) { providers in
-            guard let provider = providers.first else { return }
-            _ = provider.loadObject(ofClass: String.self) { string, _ in
-                guard let string else { return }
-                Task { @MainActor in
-                    switch focusedField {
-                    case .trigger:
-                        trigger += string
-                    case .content:
-                        content += string
-                    case nil:
-                        content += string
-                    }
-                }
             }
         }
     }

@@ -4,7 +4,6 @@ import Carbon.HIToolbox
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private let diagnostics = DiagnosticsLog.shared
-    private var statusBarController: StatusBarController?
     private var clipboardWatcher: ClipboardWatcher?
     private var historyWindowController: HistoryWindowController?
     private var hotkeyManager: HotkeyManager?
@@ -13,9 +12,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var settingsWindowController = SettingsWindowController(store: clipboardStore)
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hide dock icon - we're menu bar only
         NSApp.setActivationPolicy(.accessory)
-        NSApp.mainMenu = AppMenuBuilder.build()
         diagnostics.event(
             "app.started",
             details: "version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown") items=\(clipboardStore.items.count)"
@@ -33,13 +30,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize clipboard watcher
         clipboardWatcher = ClipboardWatcher(store: clipboardStore)
         clipboardWatcher?.startWatching()
-        
-        // Initialize status bar
-        statusBarController = StatusBarController(
-            onShowSettings: { [weak self] in
-                self?.showSettingsWindow()
-            }
-        )
         
         // Initialize history window controller
         historyWindowController = HistoryWindowController(store: clipboardStore)

@@ -42,3 +42,9 @@ import Testing
     #expect(ClipboardContentSignature.text(utf8Data: firstText) != .text(utf8Data: secondText))
     #expect(ClipboardContentSignature.text(utf8Data: firstText) != .image(pngData: firstText))
 }
+
+@Test func fullPreviewIsDeferredOnlyForLongOrFileBackedText() {
+    #expect(!HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(characterCount: 1_000, isFileBacked: false))
+    #expect(HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(characterCount: 1_001, isFileBacked: false))
+    #expect(HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(characterCount: 20, isFileBacked: true))
+}
