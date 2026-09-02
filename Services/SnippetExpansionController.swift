@@ -1057,16 +1057,7 @@ private final class SnippetSuggestionWindowController: NSWindowController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.isOpaque = false
-
-        if #available(macOS 26.0, *), !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-            let glassView = NSGlassEffectView()
-            glassView.style = .clear
-            glassView.cornerRadius = 16
-            glassView.contentView = hostingView
-            panel.contentView = glassView
-        } else {
-            panel.contentView = hostingView
-        }
+        panel.contentView = hostingView
         
         super.init(window: panel)
     }
@@ -1082,9 +1073,9 @@ private final class SnippetSuggestionWindowController: NSWindowController {
     func show(snippets: [Snippet], selectedIndex: Int, anchorRect: CGRect, anchorStrategy: AnchorStrategy) {
         update(snippets: snippets, selectedIndex: selectedIndex)
         
-        let width: CGFloat = 340
-        let rowHeight: CGFloat = 50
-        let chromeHeight: CGFloat = 12
+        let width: CGFloat = 310
+        let rowHeight: CGFloat = 44
+        let chromeHeight: CGFloat = 10
         let height = CGFloat(snippets.count) * rowHeight + chromeHeight
         let contentRect = NSRect(x: 0, y: 0, width: width, height: height)
         
@@ -1157,12 +1148,22 @@ private struct SnippetSuggestionListView: View {
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    private let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+    private let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
     
     var body: some View {
-        content
-            .background { background }
-            .clipShape(shape)
+        Group {
+            if reduceTransparency {
+                content
+                    .background(Color(nsColor: .windowBackgroundColor), in: shape)
+            } else if #available(macOS 26.0, *) {
+                content
+                    .glassEffect(.regular.interactive(), in: shape)
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: shape)
+            }
+        }
+        .clipShape(shape)
     }
 
     private var content: some View {
@@ -1171,44 +1172,30 @@ private struct SnippetSuggestionListView: View {
                 suggestionRow(snippet, index: index)
             }
         }
-        .padding(6)
-    }
-
-    @ViewBuilder
-    private var background: some View {
-        if reduceTransparency {
-            shape.fill(Color(nsColor: .windowBackgroundColor))
-        } else if #available(macOS 26.0, *) {
-            Color.clear
-        } else {
-            shape.fill(.ultraThinMaterial)
-        }
+        .padding(5)
     }
 
     private func suggestionRow(_ snippet: Snippet, index: Int) -> some View {
         let isSelected = index == selectedIndex
 
-        return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(":\(snippet.trigger)")
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
 
                 Text(snippet.content.replacingOccurrences(of: "\n", with: " "))
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
             Spacer(minLength: 8)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 50)
+        .padding(.horizontal, 9)
+        .frame(height: 44)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            isSelected ? Color.accentColor.opacity(0.16) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
+        .opacity(isSelected ? 1 : 0.72)
         .contentShape(Rectangle())
         .onHover { isHovering in
             if isHovering {
