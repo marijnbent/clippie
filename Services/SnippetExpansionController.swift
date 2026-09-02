@@ -1188,7 +1188,7 @@ private struct SnippetSuggestionListView: View {
     private func suggestionRow(_ snippet: Snippet, index: Int) -> some View {
         let isSelected = index == selectedIndex
 
-        HStack(spacing: 12) {
+        return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(":\(snippet.trigger)")
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))

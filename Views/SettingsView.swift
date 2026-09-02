@@ -496,6 +496,7 @@ private struct SnippetEditorSheet: View {
     let onSave: (SnippetDraft) -> Bool
     
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var snippetStore = SnippetStore.shared
     @FocusState private var focusedField: SnippetEditorFocusedField?
     @State private var trigger: String
     @State private var content: String
@@ -519,6 +520,32 @@ private struct SnippetEditorSheet: View {
             dismiss()
         }
     }
+
+    private var normalizedTrigger: String {
+        Snippet.normalizeTrigger(trigger)
+    }
+
+    private var triggerError: String? {
+        guard !trigger.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+
+        guard Snippet.isSupportedTriggerInput(trigger) else {
+            return "Use letters and numbers only."
+        }
+
+        if snippetStore.snippets.contains(where: {
+            $0.trigger == normalizedTrigger && $0.id != draft.snippetID
+        }) {
+            return "That trigger already exists."
+        }
+
+        return nil
+    }
+
+    private var canSave: Bool {
+        !normalizedTrigger.isEmpty &&
+        triggerError == nil &&
+        !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -529,12 +556,38 @@ private struct SnippetEditorSheet: View {
                 Text("Trigger")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
-                TextField("iban", text: $trigger)
-                    .focused($focusedField, equals: .trigger)
-                    .onSubmit {
-                        save()
+
+                HStack(spacing: 2) {
+                    Text(":")
+                        .foregroundStyle(.secondary)
+
+                    TextField("iban", text: $trigger)
+                        .focused($focusedField, equals: .trigger)
+                        .textFieldStyle(.plain)
+                        .onSubmit {
+                            if canSave {
+                                save()
+                            }
+                        }
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(triggerError == nil ? Color.secondary.opacity(0.25) : Color.red, lineWidth: 1)
+                }
+                .onChange(of: trigger) { value in
+                    if value.hasPrefix(":") {
+                        trigger = String(value.dropFirst())
                     }
-                    .textFieldStyle(.roundedBorder)
+                }
+
+                if let triggerError {
+                    Text(triggerError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
             
             VStack(alignment: .leading, spacing: 6) {
@@ -562,6 +615,7 @@ private struct SnippetEditorSheet: View {
                     save()
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!canSave)
             }
         }
         .padding(20)

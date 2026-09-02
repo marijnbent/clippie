@@ -48,3 +48,12 @@ import Testing
     #expect(HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(characterCount: 1_001, isFileBacked: false))
     #expect(HistoryPreviewLoadingPolicy.shouldDeferFullTextPreview(characterCount: 20, isFileBacked: true))
 }
+
+@Test func exactSnippetWaitsOnlyWhenAnotherTriggerContinuesIt() {
+    let exact = Snippet(title: "", trigger: "mail", content: "Personal email")
+    let longer = Snippet(title: "", trigger: "mailwork", content: "Work email")
+    let unrelated = Snippet(title: "", trigger: "email", content: "Other email")
+
+    #expect(!SnippetExpansionPolicy.shouldAutoExpand(exact, among: [exact, longer]))
+    #expect(SnippetExpansionPolicy.shouldAutoExpand(exact, among: [exact, unrelated]))
+}
