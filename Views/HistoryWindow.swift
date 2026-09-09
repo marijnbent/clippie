@@ -545,7 +545,7 @@ private struct QuickActionRow: View {
 /// Main content view - Split pane with list and detail
 struct HistoryContentView: View {
     private static let initialVisibleClipboardItemLimit = 50
-    private static let searchDebounceDelay: DispatchTimeInterval = .milliseconds(70)
+    private static let searchDebounceDelayNanoseconds: UInt64 = 70_000_000
     private static let keyboardPreviewDelayNanoseconds: UInt64 = 300_000_000
 
     @ObservedObject var store: ClipboardStore
@@ -575,6 +575,7 @@ struct HistoryContentView: View {
     @State private var quickActionError: String?
     @State private var filteredClipboardItems: [ClipboardItem] = []
     @State private var clipboardSearchRevision = 0
+    @State private var clipboardSearchTask: Task<Void, Never>?
     @State private var navigationSequence = 0
     @State private var pendingNavigation: HistoryNavigationMeasurement?
     @State private var previousNavigationKeyAt: ContinuousClock.Instant?
@@ -723,6 +724,9 @@ struct HistoryContentView: View {
         )
         .onAppear {
             refreshFilteredItems()
+        }
+        .onDisappear {
+            clipboardSearchTask?.cancel()
         }
         .onChange(of: searchText) { _ in
             pendingNavigation = nil
@@ -1805,6 +1809,7 @@ struct HistoryContentView: View {
     }
 
     private func refreshFilteredItems() {
+        clipboardSearchTask?.cancel()
         clipboardSearchRevision += 1
         let revision = clipboardSearchRevision
 
@@ -1821,6 +1826,7 @@ struct HistoryContentView: View {
             return
         }
 
+        let store = store
         let items = store.items
         let collectDiagnostics = diagnostics.isEnabled
         let requestStart = collectDiagnostics ? ContinuousClock.now : nil
@@ -1831,12 +1837,17 @@ struct HistoryContentView: View {
         } ?? 0
         let queryCharacterCount = query.count
 
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.searchDebounceDelay) {
-            let scan = store.search(items, normalizedQuery: normalizedQuery)
+        clipboardSearchTask = Task.detached(priority: .userInitiated) {
+            do {
+                try await Task.sleep(nanoseconds: Self.searchDebounceDelayNanoseconds)
+            } catch {
+                return
+            }
+            guard let scan = store.search(items, normalizedQuery: normalizedQuery) else { return }
             let scanFinished = collectDiagnostics ? ContinuousClock.now : nil
 
-            DispatchQueue.main.async {
-                let isCurrent = revision == clipboardSearchRevision
+            await MainActor.run {
+                let isCurrent = !Task.isCancelled && revision == clipboardSearchRevision
                 guard isCurrent else {
                     if let requestStart, let scanFinished {
                         logSearchBenchmark(

@@ -96,42 +96,28 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         textFilename != nil
     }
     
-    /// Preview text for display (truncated for long content)
     var previewText: String {
-        switch type {
-        case .text:
-            let text = textContent ?? ""
-            if text.count > 200 {
-                return String(text.prefix(200)) + "…"
+        guard type == .text else { return "Image" }
+        var preview = ""
+        var characterCount = 0
+        var pendingSpace = false
+
+        for character in textContent ?? "" {
+            if character.isWhitespace {
+                pendingSpace = characterCount > 0
+                continue
             }
-            return text
-        case .image:
-            return "Image"
+            if pendingSpace {
+                guard characterCount < 50 else { return preview + "…" }
+                preview.append(" ")
+                characterCount += 1
+                pendingSpace = false
+            }
+            guard characterCount < 50 else { return preview + "…" }
+            preview.append(character)
+            characterCount += 1
         }
-    }
-    
-    /// Content hash for duplicate detection
-    var contentHash: Int {
-        switch type {
-        case .text:
-            return textContent?.hashValue ?? 0
-        case .image:
-            return imageFilename?.hashValue ?? 0
-        }
-    }
-    
-    static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool {
-        lhs.id == rhs.id &&
-            lhs.type == rhs.type &&
-            lhs.timestamp == rhs.timestamp &&
-            lhs.sourceApp == rhs.sourceApp &&
-            lhs.sourceBundleIdentifier == rhs.sourceBundleIdentifier &&
-            lhs.textContent == rhs.textContent &&
-            lhs.textFilename == rhs.textFilename &&
-            lhs.imageFilename == rhs.imageFilename &&
-            lhs.ocrText == rhs.ocrText &&
-            lhs.isTruncated == rhs.isTruncated &&
-            lhs.originalSizeBytes == rhs.originalSizeBytes
+        return preview
     }
 }
 

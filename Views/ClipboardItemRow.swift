@@ -25,18 +25,6 @@ struct ClipboardItemRow: View {
         isSelected ? 0 : 4
     }
     
-    /// Truncated preview for list display - short and single line
-    private var truncatedPreviewText: String {
-        let text = item.textContent ?? item.previewText
-        // Replace newlines and extra whitespace with single space
-        let singleLine = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
-        // Truncate to 50 characters for compact display
-        if singleLine.count > 50 {
-            return String(singleLine.prefix(50)) + "…"
-        }
-        return singleLine
-    }
-    
     var body: some View {
         HStack(spacing: 12) {
             if item.type == .image {
@@ -45,7 +33,7 @@ struct ClipboardItemRow: View {
             }
 
             // Slightly larger text with a bit more air so the list reads more comfortably.
-            Text(truncatedPreviewText)
+            Text(item.previewText)
                 .font(.system(size: 14))
                 .foregroundColor(.primary)
                 .lineLimit(1)

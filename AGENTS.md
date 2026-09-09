@@ -1,5 +1,7 @@
 # clippie Agent Notes
 
+Use [shared workspace rules](../AGENTS.md) for UI copy, configuration, repository scope, and release completion.
+
 ## Signed Builds
 
 - Build this app with signing enabled.
@@ -26,14 +28,3 @@ Build a signed local release app without installing it:
 - The user has already confirmed local Release builds can use the existing signing setup.
 - Use bundle identifier `nl.bentjes.clippie` unless the user asks to change it.
 - If signing fails, do not silently switch to an unsigned build. Tell the user what failed.
-
-## UI Copy
-
-- When the user explains why they want a UI change, treat that as internal context unless they explicitly ask for it to appear in the product.
-- Do not turn their rationale, business goals, or implementation notes into visible UI copy.
-
-## Configuration
-
-- Do not default to turning every setting into an environment variable.
-- Only introduce environment variables when explicitly requested or when clearly necessary.
-- If adding an environment variable is optional, ask first.
