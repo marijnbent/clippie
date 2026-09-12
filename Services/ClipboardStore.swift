@@ -54,7 +54,13 @@ class ClipboardStore: ObservableObject {
     private let searchStateLock = NSLock()
     private var pendingHistorySnapshot: [ClipboardItem]?
     private var isHistorySaveWorkerRunning = false
+    private var latestReferencedFiles: Set<String> = []
+    private var pendingFileDeletions: [UUID: ClipboardItem] = [:]
+    private var lastHistorySaveError: String?
+    private var isRetryScheduled = false
+    private let writeHistory: (Data, URL) throws -> Void
     private var activeSearchCount = 0
+    let imageCache: ClipboardImageCache
     private let fullTextCache = NSCache<NSUUID, NSString>()
     private let fileTextSearchCache = NSCache<NSUUID, NSString>()
     private let storageDirectory: URL
@@ -76,10 +82,12 @@ class ClipboardStore: ObservableObject {
         storageDirectory.appendingPathComponent("texts", isDirectory: true)
     }
     
-    init(storageDirectory: URL? = nil) {
+    init(storageDirectory: URL? = nil, writeHistory: @escaping (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }) {
+        self.writeHistory = writeHistory
         self.storageDirectory = storageDirectory ?? fileManager
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("clippie", isDirectory: true)
+        imageCache = ClipboardImageCache(imagesDirectory: self.storageDirectory.appendingPathComponent("images"))
         fullTextCache.totalCostLimit = 16 * 1_024 * 1_024
         fileTextSearchCache.totalCostLimit = 16 * 1_024 * 1_024
         if storageDirectory == nil {
@@ -148,7 +156,7 @@ class ClipboardStore: ObservableObject {
         items.removeAll { $0.id == item.id }
         invalidateCachedFullText(for: item.id)
         invalidateCachedSearchText(for: item.id)
-        deleteAssociatedFiles(for: item)
+        queueFileDeletions([item])
         
         scheduleHistorySave(items)
     }
@@ -192,9 +200,7 @@ class ClipboardStore: ObservableObject {
     
     func clear() {
         // Delete all associated files
-        for item in items {
-            deleteAssociatedFiles(for: item)
-        }
+        queueFileDeletions(items)
         items.removeAll()
         clearCachedFullText()
         clearCachedSearchText()
@@ -216,7 +222,7 @@ class ClipboardStore: ObservableObject {
         for item in removed {
             invalidateCachedFullText(for: item.id)
             invalidateCachedSearchText(for: item.id)
-            deleteAssociatedFiles(for: item)
+            queueFileDeletions([item])
         }
 
         scheduleHistorySave(items)
@@ -276,6 +282,58 @@ class ClipboardStore: ObservableObject {
         }
     }
     
+    func loadActionText(for item: ClipboardItem) async throws -> String {
+        try Task.checkCancellation()
+        guard item.type == .text else { throw ClipboardContentError.unavailable }
+        guard let filename = item.textFilename else {
+            guard let text = item.textContent else { throw ClipboardContentError.unavailable }
+            return text
+        }
+        if let cached = fullTextCache.object(forKey: item.id as NSUUID) {
+            return cached as String
+        }
+        let work = Task.detached(priority: .userInitiated) { [self] in
+            try Task.checkCancellation()
+            let text = try loadFullTextFromDisk(filename: filename)
+            try Task.checkCancellation()
+            cacheFullText(text, for: item.id)
+            return text
+        }
+        return try await withTaskCancellationHandler {
+            let text = try await work.value
+            try Task.checkCancellation()
+            return text
+        } onCancel: {
+            work.cancel()
+        }
+    }
+
+    func prepareClipboardContent(for item: ClipboardItem) async throws -> PreparedClipboardContent {
+        if item.type == .text {
+            return .text(try await loadActionText(for: item))
+        }
+        guard let filename = item.imageFilename else { throw ClipboardContentError.unavailable }
+        let url = imagesDirectory.appendingPathComponent(filename)
+        let work = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let png = try Data(contentsOf: url)
+            try Task.checkCancellation()
+            guard let bitmap = NSBitmapImageRep(data: png),
+                  let tiff = bitmap.representation(using: .tiff, properties: [:]) else {
+                throw ClipboardContentError.unavailable
+            }
+            try Task.checkCancellation()
+            return PreparedClipboardContent.image(png: png, tiff: tiff)
+        }
+        return try await withTaskCancellationHandler {
+            let content = try await work.value
+            try Task.checkCancellation()
+            return content
+        } onCancel: {
+            work.cancel()
+        }
+    }
+
     func image(for item: ClipboardItem) -> NSImage? {
         guard item.type == .image, let filename = item.imageFilename else { return nil }
         let url = imagesDirectory.appendingPathComponent(filename)
@@ -309,35 +367,9 @@ class ClipboardStore: ObservableObject {
         }
     }
     
-    /// Load full text content from file (lazy loading for large text)
-    func fullText(for item: ClipboardItem) -> String? {
-        guard item.type == .text else { return nil }
-        guard item.textFilename != nil else { return item.textContent }
-        return cachedFullText(for: item) ?? item.textContent
-    }
-
     private func cachedPreviewText(for item: ClipboardItem) async -> String? {
         guard item.type == .text else { return nil }
-        guard let filename = item.textFilename else { return item.textContent }
-        if let cached = fullTextCache.object(forKey: item.id as NSUUID) {
-            return cached as String
-        }
-
-        let url = textsDirectory.appendingPathComponent(filename)
-        let text: String? = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    continuation.resume(returning: try String(contentsOf: url, encoding: .utf8))
-                } catch {
-                    print("[clippie] Failed to load text file: \(error)")
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
-        if let text {
-            cacheFullText(text, for: item.id)
-        }
-        return text ?? item.textContent
+        return (try? await loadActionText(for: item)) ?? item.textContent
     }
 
     /// Searches one immutable history snapshot and returns content-free performance measurements.
@@ -588,7 +620,7 @@ class ClipboardStore: ObservableObject {
             clearCachedFullText()
             clearCachedSearchText()
             self.items = retentionResult.retained
-            retentionResult.removed.forEach(deleteAssociatedFiles(for:))
+            queueFileDeletions(retentionResult.removed)
             if !retentionResult.removed.isEmpty {
                 scheduleHistorySave(retentionResult.retained)
             }
@@ -599,13 +631,17 @@ class ClipboardStore: ObservableObject {
     }
     
     /// Wait for the newest history snapshot to reach disk. Call this during app termination.
-    func flushPendingHistorySave() {
+    @discardableResult
+    func flushPendingHistorySave() -> Bool {
         scheduleHistorySave(items)
+        saveQueue.async { [self] in drainPendingHistorySaves() }
         saveQueue.sync {}
+        return saveStateLock.withLock { lastHistorySaveError == nil && pendingHistorySnapshot == nil }
     }
 
     private func scheduleHistorySave(_ snapshot: [ClipboardItem]) {
         saveStateLock.lock()
+        latestReferencedFiles = Self.referencedFiles(in: snapshot)
         pendingHistorySnapshot = snapshot
         let shouldStartWorker = !isHistorySaveWorkerRunning
         if shouldStartWorker {
@@ -621,7 +657,17 @@ class ClipboardStore: ObservableObject {
 
     private func drainPendingHistorySaves() {
         while let snapshot = takePendingHistorySnapshot() {
-            saveHistoryToDisk(snapshot)
+            guard saveHistoryToDisk(snapshot) else {
+                saveStateLock.withLock {
+                    if pendingHistorySnapshot == nil {
+                        pendingHistorySnapshot = snapshot
+                    }
+                    isHistorySaveWorkerRunning = false
+                }
+                scheduleHistoryRetry()
+                return
+            }
+            deleteUnreferencedFiles(afterSaving: snapshot)
         }
     }
 
@@ -638,31 +684,76 @@ class ClipboardStore: ObservableObject {
         return snapshot
     }
 
-    private func saveHistoryToDisk(_ itemsToSave: [ClipboardItem]) {
+    private func saveHistoryToDisk(_ itemsToSave: [ClipboardItem]) -> Bool {
         do {
             let data = try JSONEncoder().encode(itemsToSave)
-            try data.write(to: historyFileURL, options: .atomic)
+            try writeHistory(data, historyFileURL)
+            saveStateLock.withLock { lastHistorySaveError = nil }
+            return true
         } catch {
+            saveStateLock.withLock { lastHistorySaveError = error.localizedDescription }
             print("[clippie] Failed to save history: \(error)")
+            return false
         }
     }
-    
-    private func deleteImageFile(for item: ClipboardItem) {
-        guard item.type == .image, let filename = item.imageFilename else { return }
-        let url = imagesDirectory.appendingPathComponent(filename)
-        try? fileManager.removeItem(at: url)
+
+    private func scheduleHistoryRetry() {
+        guard !isRetryScheduled else { return }
+        isRetryScheduled = true
+        saveQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.isRetryScheduled = false
+            let shouldRetry = self.saveStateLock.withLock {
+                guard self.pendingHistorySnapshot != nil, !self.isHistorySaveWorkerRunning else { return false }
+                self.isHistorySaveWorkerRunning = true
+                return true
+            }
+            if shouldRetry {
+                self.drainPendingHistorySaves()
+            }
+        }
     }
-    
-    private func deleteTextFile(for item: ClipboardItem) {
-        guard let filename = item.textFilename else { return }
-        let url = textsDirectory.appendingPathComponent(filename)
-        try? fileManager.removeItem(at: url)
+
+    private func queueFileDeletions(_ items: [ClipboardItem]) {
+        saveStateLock.withLock {
+            for item in items {
+                pendingFileDeletions[item.id] = item
+            }
+        }
     }
-    
-    /// Delete all associated files (images and text files) for an item
-    private func deleteAssociatedFiles(for item: ClipboardItem) {
-        deleteImageFile(for: item)
-        deleteTextFile(for: item)
+
+    private static func referencedFiles(in items: [ClipboardItem]) -> Set<String> {
+        Set(items.flatMap { [$0.imageFilename, $0.textFilename].compactMap { $0 } })
+    }
+
+    private func deleteUnreferencedFiles(afterSaving savedItems: [ClipboardItem]) {
+        let savedReferences = Self.referencedFiles(in: savedItems)
+        let candidates = saveStateLock.withLock { Array(pendingFileDeletions.values) }
+        for item in candidates {
+            let files = [
+                item.imageFilename.map { imagesDirectory.appendingPathComponent($0) },
+                item.textFilename.map { textsDirectory.appendingPathComponent($0) }
+            ].compactMap { $0 }
+            var removed = true
+            for url in files {
+                let isReferenced = savedReferences.contains(url.lastPathComponent)
+                    || saveStateLock.withLock { latestReferencedFiles.contains(url.lastPathComponent) }
+                guard !isReferenced else {
+                    removed = false
+                    continue
+                }
+                do {
+                    try fileManager.removeItem(at: url)
+                } catch {
+                    if fileManager.fileExists(atPath: url.path) {
+                        removed = false
+                    }
+                }
+            }
+            if removed {
+                _ = saveStateLock.withLock { pendingFileDeletions.removeValue(forKey: item.id) }
+            }
+        }
     }
 
     private func isImageOrLargeText(_ item: ClipboardItem) -> Bool {
@@ -736,26 +827,6 @@ class ClipboardStore: ObservableObject {
         fileTextSearchCache.object(forKey: id as NSUUID).map { $0 as String }
     }
 
-    private func cachedFullText(for item: ClipboardItem) -> String? {
-        fullTextCache.object(forKey: item.id as NSUUID).map { $0 as String }
-            ?? loadAndCacheFullText(for: item)
-    }
-
-    private func loadAndCacheFullText(for item: ClipboardItem) -> String? {
-        guard let filename = item.textFilename else {
-            return item.textContent
-        }
-
-        do {
-            let text = try loadFullTextFromDisk(filename: filename)
-            cacheFullText(text, for: item.id)
-            return text
-        } catch {
-            print("[clippie] Failed to load text file: \(error)")
-            return item.textContent
-        }
-    }
-
     private func loadFullTextFromDisk(filename: String) throws -> String {
         let url = textsDirectory.appendingPathComponent(filename)
         return try String(contentsOf: url, encoding: .utf8)
@@ -770,6 +841,7 @@ class ClipboardStore: ObservableObject {
     }
 
     private func invalidateCachedFullText(for id: UUID) {
+        imageCache.invalidateThumbnail(for: id)
         fullTextCache.removeObject(forKey: id as NSUUID)
     }
 
@@ -778,6 +850,7 @@ class ClipboardStore: ObservableObject {
     }
 
     private func clearCachedFullText() {
+        imageCache.removeAllThumbnails()
         fullTextCache.removeAllObjects()
     }
 
@@ -789,7 +862,7 @@ class ClipboardStore: ObservableObject {
         let retentionResult = applyingHistoryRetention(to: items)
         guard retentionResult.removed.isEmpty == false else { return }
 
-        retentionResult.removed.forEach(deleteAssociatedFiles(for:))
+        queueFileDeletions(retentionResult.removed)
         retentionResult.removed.forEach { invalidateCachedFullText(for: $0.id) }
         retentionResult.removed.forEach { invalidateCachedSearchText(for: $0.id) }
         items = retentionResult.retained

@@ -105,6 +105,7 @@ private struct GlassPanelBackground: View {
 class HistoryWindowController: NSWindowController {
     private let store: ClipboardStore
     private let diagnostics = DiagnosticsLog.shared
+    private var contentTask: Task<Void, Never>?
     private var targetApplicationForPaste: NSRunningApplication?
     private var storedStandardFrame: NSRect?
     private var isPresentingImagePreview = false
@@ -204,27 +205,64 @@ class HistoryWindowController: NSWindowController {
     }
     
     private func copyToClipboard(_ item: ClipboardItem) {
-        PasteController.copyToClipboard(item, store: store)
+        contentTask?.cancel()
+        contentTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let content = try await store.prepareClipboardContent(for: item)
+                try Task.checkCancellation()
+                guard store.items.contains(where: { $0.id == item.id }) else { return }
+                if !PasteController.copyToClipboard(content) { NSSound.beep() }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, store.items.contains(where: { $0.id == item.id }) else { return }
+                NSAlert(error: error).runModal()
+            }
+        }
     }
-    
+
     private func copyTextToClipboard(_ text: String) {
+        contentTask?.cancel()
         PasteController.copyTextToClipboard(text)
     }
-    
+
     private func pasteItem(_ item: ClipboardItem) {
         let targetApplication = targetApplicationForPaste
-        store.moveToTop(item)
         close()
-        PasteController.paste(item, store: store, targetApplication: targetApplication)
+        contentTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let content = try await store.prepareClipboardContent(for: item)
+                try Task.checkCancellation()
+                guard store.items.contains(where: { $0.id == item.id }) else { return }
+                if await PasteController.paste(content, targetApplication: targetApplication), !Task.isCancelled {
+                    store.moveToTop(item)
+                }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, store.items.contains(where: { $0.id == item.id }) else { return }
+                NSAlert(error: error).runModal()
+            }
+        }
     }
-    
+
     private func pasteText(_ text: String) {
         let targetApplication = targetApplicationForPaste
         close()
-        PasteController.paste(text: text, targetApplication: targetApplication)
+        contentTask = Task { @MainActor in
+            _ = await PasteController.paste(.text(text), targetApplication: targetApplication)
+        }
     }
-    
+
+    override func close() {
+        contentTask?.cancel()
+        contentTask = nil
+        super.close()
+    }
+
     override func showWindow(_ sender: Any?) {
+        contentTask?.cancel()
+        contentTask = nil
         let showStart = diagnostics.isEnabled ? ContinuousClock.now : nil
         captureCurrentTargetApplication()
         if !isPresentingImagePreview {
@@ -569,6 +607,8 @@ struct HistoryContentView: View {
     @State private var quickActionRoute: QuickActionRoute = .home
     @State private var snippetDraftTrigger = ""
     @State private var snippetDraftContent = ""
+    @State private var snippetDraftTask: Task<Void, Never>?
+    @State private var isLoadingSnippetDraft = false
     @State private var quickActionHomeSelection = 0
     @State private var quickActionConfirmationSelection = 0
     @State private var quickActionMessage: String?
@@ -652,11 +692,6 @@ struct HistoryContentView: View {
         return "\(count) item" + (count == 1 ? "" : "s")
     }
 
-    private var selectedItemActionText: String? {
-        guard let item = selectedItem else { return nil }
-        return actionText(for: item)
-    }
-
     private var selectedItemActionWarning: String? {
         guard let item = selectedItem else { return nil }
         return actionWarning(for: item)
@@ -727,6 +762,7 @@ struct HistoryContentView: View {
         }
         .onDisappear {
             clipboardSearchTask?.cancel()
+            snippetDraftTask?.cancel()
         }
         .onChange(of: searchText) { _ in
             pendingNavigation = nil
@@ -1375,7 +1411,9 @@ struct HistoryContentView: View {
 
     private func quickActionSaveSnippetPane(for item: ClipboardItem) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !canSaveItemAsSnippet(item) || selectedItemActionText == nil {
+            if isLoadingSnippetDraft {
+                ProgressView()
+            } else if !canSaveItemAsSnippet(item) || snippetDraftContent.isEmpty {
                 // No-text warning state
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
@@ -1418,7 +1456,7 @@ struct HistoryContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
-            .disabled(selectedItemActionText == nil)
+            .disabled(isLoadingSnippetDraft || snippetDraftContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
@@ -1774,6 +1812,9 @@ struct HistoryContentView: View {
     }
 
     private func resetQuickActionState() {
+        snippetDraftTask?.cancel()
+        snippetDraftTask = nil
+        isLoadingSnippetDraft = false
         setDetailPaneMode(.preview)
         quickActionRoute = .home
         quickActionHomeSelection = 0
@@ -1787,17 +1828,6 @@ struct HistoryContentView: View {
 
     private func canSaveItemAsSnippet(_ item: ClipboardItem) -> Bool {
         item.type == .text
-    }
-
-    private func actionText(for item: ClipboardItem) -> String? {
-        switch item.type {
-        case .text:
-            let text = store.fullText(for: item) ?? item.textContent ?? ""
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        case .image:
-            return nil
-        }
     }
 
     private func actionWarning(for item: ClipboardItem) -> String? {
@@ -1914,10 +1944,26 @@ struct HistoryContentView: View {
     }
 
     private func prepareSnippetDraft(for item: ClipboardItem) {
-        let sourceText = actionText(for: item) ?? ""
+        snippetDraftTask?.cancel()
         quickActionFocusedField = nil
         snippetDraftTrigger = ""
-        snippetDraftContent = sourceText
+        snippetDraftContent = ""
+        isLoadingSnippetDraft = true
+        snippetDraftTask = Task { @MainActor in
+            do {
+                let text = try await store.loadActionText(for: item)
+                try Task.checkCancellation()
+                guard selectedItem?.id == item.id, quickActionRoute == .saveSnippet else { return }
+                snippetDraftContent = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                isLoadingSnippetDraft = false
+                quickActionFocusedField = .snippetTrigger
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, selectedItem?.id == item.id, quickActionRoute == .saveSnippet else { return }
+                isLoadingSnippetDraft = false
+                quickActionError = error.localizedDescription
+            }
+        }
     }
 
     private func openQuickActions(for item: ClipboardItem, route: QuickActionRoute = .home) {
@@ -1932,9 +1978,6 @@ struct HistoryContentView: View {
             quickActionFocusedField = nil
         case .saveSnippet:
             prepareSnippetDraft(for: item)
-            DispatchQueue.main.async {
-                quickActionFocusedField = .snippetTrigger
-            }
         case .confirmation(let confirmation):
             quickActionConfirmationSelection = defaultQuickActionConfirmationSelection(for: confirmation)
             quickActionFocusedField = nil
@@ -1949,6 +1992,7 @@ struct HistoryContentView: View {
     }
 
     private func saveSnippetFromQuickActions() {
+        guard !isLoadingSnippetDraft else { return }
         guard let item = selectedItem, canSaveItemAsSnippet(item) else {
             quickActionError = "Only text clips can be saved as snippets."
             quickActionMessage = nil

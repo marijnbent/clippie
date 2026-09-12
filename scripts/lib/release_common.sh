@@ -38,7 +38,7 @@ release::require_config() {
 release::bool_tag() {
   local raw
   raw="$(release::require_config "$1")"
-  case "${raw,,}" in
+  case "$raw" in
     true|yes|1) printf 'true' ;;
     false|no|0) printf 'false' ;;
     *) release::fail "Expected boolean for $1, got: $raw" ;;
@@ -79,9 +79,28 @@ release::prepare_build_directories() {
   mkdir -p "$BUILD_DIR" "$TMP_DIR"
 }
 
+release::verify_identity() {
+  local identity
+  identity="$(release::require_config SigningIdentity)"
+  security find-identity -v -p codesigning | grep -Fq "\"$identity\"" || release::fail "Signing identity is not installed: $identity"
+}
+
 release::quit_running_app() {
   local app_name="$1"
-  osascript -e "tell application \"$app_name\" to quit" >/dev/null 2>&1 || true
+  local app_path pattern attempt
+  for app_path in "$(release::installed_bundle_path)" "$(release::build_bundle_path)"; do
+    pattern="^$app_path/Contents/MacOS/$app_name( |$)"
+    if pgrep -f "$pattern" >/dev/null; then
+      osascript -e "tell application \"$app_path\" to quit" || release::fail "Could not quit $app_path"
+      for attempt in {1..20}; do
+        pgrep -f "$pattern" >/dev/null || break
+        sleep 0.25
+      done
+      if pgrep -f "$pattern" >/dev/null; then
+        release::fail "$app_name is still open. Close its dialogs and quit before installing."
+      fi
+    fi
+  done
 }
 
 release::normalize_bundle() {
@@ -210,6 +229,8 @@ EOF
     NSInputMonitoringUsageDescription
     NSAppleEventsUsageDescription
     NSMicrophoneUsageDescription
+    NSCameraUsageDescription
+    NSUserNotificationAlertStyle
   )
 
   local key
@@ -269,6 +290,7 @@ release::install_bundle() {
   destination="$(release::installed_bundle_path)"
   rm -rf "$destination"
   ditto "$bundle" "$destination"
+  release::verify_bundle "$destination"
   open "$destination"
   release::print "Installed $destination"
 }
@@ -283,6 +305,7 @@ release::build_swiftpm_app() {
   fi
 
   release::require_file "$RELEASE_ENTITLEMENTS"
+  release::verify_identity
   release::prepare_build_directories
 
   (
@@ -308,66 +331,11 @@ release::build_swiftpm_app() {
 
   release::copy_swiftpm_resource_bundles "$bin_dir" "$resources_dir"
   release::copy_swiftpm_frameworks "$bin_dir" "$frameworks_dir" "$macos_dir/$(release::app_name)"
-  icon_name="$(release::install_icon "$resources_dir" || true)"
+  icon_name="$(release::install_icon "$resources_dir")"
   release::write_info_plist "$contents_dir/Info.plist" "$icon_name"
   release::normalize_bundle "$app_bundle"
   release::sign_bundle "$app_bundle" "$RELEASE_ENTITLEMENTS"
-
-  release::print "Built $app_bundle"
-}
-
-release::build_xcode_app() {
-  local xcode_project xcode_scheme derived_data_path built_app_path app_bundle
-  local host_arch development_team code_sign_identity marketing_version build_number
-
-  xcode_project="$(release::require_config XcodeProject)"
-  xcode_scheme="$(release::require_config XcodeScheme)"
-  development_team="$(release::require_config DevelopmentTeam)"
-  code_sign_identity="$(release::config XcodeCodeSignIdentity || true)"
-  marketing_version="$(release::require_config MarketingVersion)"
-  build_number="$(release::require_config BuildNumber)"
-  host_arch="$(uname -m)"
-  derived_data_path="$ROOT_DIR/build/DerivedData"
-
-  release::prepare_build_directories
-  rm -rf "$derived_data_path"
-
-  (
-    cd "$ROOT_DIR"
-    if [[ -n "$code_sign_identity" ]]; then
-      xcodebuild \
-        -project "$ROOT_DIR/$xcode_project" \
-        -scheme "$xcode_scheme" \
-        -configuration Release \
-        -derivedDataPath "$derived_data_path" \
-        ARCHS="$host_arch" \
-        ONLY_ACTIVE_ARCH=YES \
-        DEVELOPMENT_TEAM="$development_team" \
-        CODE_SIGN_IDENTITY="$code_sign_identity" \
-        MARKETING_VERSION="$marketing_version" \
-        CURRENT_PROJECT_VERSION="$build_number" \
-        build
-    else
-      xcodebuild \
-        -project "$ROOT_DIR/$xcode_project" \
-        -scheme "$xcode_scheme" \
-        -configuration Release \
-        -derivedDataPath "$derived_data_path" \
-        ARCHS="$host_arch" \
-        ONLY_ACTIVE_ARCH=YES \
-        DEVELOPMENT_TEAM="$development_team" \
-        MARKETING_VERSION="$marketing_version" \
-        CURRENT_PROJECT_VERSION="$build_number" \
-        build
-    fi
-  )
-
-  built_app_path="$derived_data_path/Build/Products/Release/$(release::app_name).app"
-  [[ -d "$built_app_path" ]] || release::fail "Missing Xcode app bundle: $built_app_path"
-
-  app_bundle="$(release::build_bundle_path)"
-  ditto "$built_app_path" "$app_bundle"
-  release::normalize_bundle "$app_bundle"
+  release::verify_bundle "$app_bundle"
 
   release::print "Built $app_bundle"
 }
@@ -379,9 +347,6 @@ release::build_release_app() {
   case "$backend" in
     swiftpm)
       release::build_swiftpm_app
-      ;;
-    xcode)
-      release::build_xcode_app
       ;;
     *)
       release::fail "Unsupported BuildBackend: $backend"

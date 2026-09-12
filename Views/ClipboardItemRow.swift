@@ -72,17 +72,21 @@ struct ClipboardItemRow: View {
         }
         .task(id: item.id) {
             sourceAppIcon = nil
+            thumbnail = nil
             if item.sourceBundleIdentifier != nil || item.sourceApp != nil {
-                sourceAppIcon = await loadSourceAppIcon()
+                let icon = await store.imageCache.sourceAppIcon(for: item)
+                guard !Task.isCancelled else { return }
+                sourceAppIcon = icon
             }
-            
-            // Load thumbnail async off main thread
-            if item.type == .image && thumbnail == nil {
-                thumbnail = await loadThumbnail()
+            if item.type == .image {
+                let image = await store.imageCache.thumbnail(for: item)
+                guard !Task.isCancelled else { return }
+                thumbnail = image
             }
         }
     }
     
+
     @ViewBuilder
     private var icon: some View {
         if item.type == .image {
@@ -101,54 +105,4 @@ struct ClipboardItemRow: View {
         }
     }
     
-    /// Generate a small thumbnail asynchronously
-    private func loadThumbnail() async -> NSImage? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let original = store.image(for: item) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                // Create a tiny thumbnail (40x40 for retina)
-                let thumbSize = NSSize(width: 56, height: 56)
-                let thumb = NSImage(size: thumbSize)
-                thumb.lockFocus()
-                original.draw(
-                    in: NSRect(origin: .zero, size: thumbSize),
-                    from: NSRect(origin: .zero, size: original.size),
-                    operation: .copy,
-                    fraction: 1.0
-                )
-                thumb.unlockFocus()
-                
-                continuation.resume(returning: thumb)
-            }
-        }
-    }
-
-    private func loadSourceAppIcon() async -> NSImage? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                if let bundleIdentifier = item.sourceBundleIdentifier,
-                   let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-                    let icon = NSWorkspace.shared.icon(forFile: appURL.path)
-                    icon.size = NSSize(width: 16, height: 16)
-                    continuation.resume(returning: icon)
-                    return
-                }
-
-                if let appName = item.sourceApp,
-                   let runningApp = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }),
-                   let appURL = runningApp.bundleURL {
-                    let icon = NSWorkspace.shared.icon(forFile: appURL.path)
-                    icon.size = NSSize(width: 16, height: 16)
-                    continuation.resume(returning: icon)
-                    return
-                }
-
-                continuation.resume(returning: nil)
-            }
-        }
-    }
 }

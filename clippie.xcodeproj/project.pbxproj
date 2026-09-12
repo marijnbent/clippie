@@ -25,6 +25,7 @@
 		AAA00017 /* SnippetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00019 /* SnippetStore.swift */; };
 		AAA00018 /* SnippetExpansionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00020 /* SnippetExpansionController.swift */; };
 		AAA00020 /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00022 /* SettingsWindowController.swift */; };
+		AAA00021 /* ClipboardImageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBB00023 /* ClipboardImageCache.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +50,7 @@
 		BBB00019 /* SnippetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnippetStore.swift; sourceTree = "<group>"; };
 		BBB00020 /* SnippetExpansionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnippetExpansionController.swift; sourceTree = "<group>"; };
 		BBB00022 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
+		BBB00023 /* ClipboardImageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardImageCache.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -99,6 +101,7 @@
 			children = (
 				BBB00004 /* ClipboardWatcher.swift */,
 				BBB00005 /* ClipboardStore.swift */,
+				BBB00023 /* ClipboardImageCache.swift */,
 				BBB00006 /* HotkeyManager.swift */,
 				BBB00007 /* PasteController.swift */,
 				BBB00015 /* SettingsManager.swift */,
@@ -203,6 +206,7 @@
 				AAA00003 /* ClipboardItem.swift in Sources */,
 				AAA00004 /* ClipboardWatcher.swift in Sources */,
 				AAA00005 /* ClipboardStore.swift in Sources */,
+				AAA00021 /* ClipboardImageCache.swift in Sources */,
 				AAA00006 /* HotkeyManager.swift in Sources */,
 				AAA00007 /* PasteController.swift in Sources */,
 				AAA00008 /* HistoryWindow.swift in Sources */,

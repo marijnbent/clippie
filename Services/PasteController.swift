@@ -1,6 +1,16 @@
 import Cocoa
 
-/// Handles pasting content into the frontmost application
+enum ClipboardContentError: LocalizedError {
+    case unavailable
+    var errorDescription: String? { "The saved clipboard content could not be loaded." }
+}
+
+enum PreparedClipboardContent: Sendable, Equatable {
+    case text(String)
+    case image(png: Data, tiff: Data)
+}
+
+@MainActor
 class PasteController {
     private static let pasteDelay: TimeInterval = 0.12
 
@@ -11,44 +21,30 @@ class PasteController {
         }
     }
     
-    /// Copy item content back to system clipboard
     @discardableResult
-    static func copyToClipboard(_ item: ClipboardItem, store: ClipboardStore) -> Bool {
-        switch item.type {
-        case .text:
-            guard let text = store.fullText(for: item) else { return false }
-            return writeToPasteboard { pasteboard in
-                pasteboard.setString(text, forType: .string)
-            }
-        case .image:
-            guard let image = store.image(for: item),
-                  let tiffData = image.tiffRepresentation else {
-                return false
-            }
-            return writeToPasteboard { pasteboard in
-                pasteboard.setData(tiffData, forType: .tiff)
+    static func copyToClipboard(_ content: PreparedClipboardContent) -> Bool {
+        writeToPasteboard { pasteboard in
+            switch content {
+            case .text(let text):
+                return pasteboard.setString(text, forType: .string)
+            case .image(let png, let tiff):
+                let item = NSPasteboardItem()
+                guard item.setData(png, forType: .png), item.setData(tiff, forType: .tiff) else { return false }
+                return pasteboard.writeObjects([item])
             }
         }
     }
-    
-    /// Paste item into the frontmost application
-    @discardableResult
-    static func paste(
-        _ item: ClipboardItem,
-        store: ClipboardStore,
-        targetApplication: NSRunningApplication? = nil
-    ) -> Bool {
-        guard copyToClipboard(item, store: store) else { return false }
 
-        prepareAndSimulatePaste(into: targetApplication)
-        return true
-    }
-    
     @discardableResult
-    static func paste(text: String, targetApplication: NSRunningApplication? = nil) -> Bool {
-        guard copyTextToClipboard(text) else { return false }
-
-        prepareAndSimulatePaste(into: targetApplication)
+    static func paste(_ content: PreparedClipboardContent, targetApplication: NSRunningApplication?) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        if let targetApplication, targetApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            guard !targetApplication.isTerminated else { return false }
+            let activePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            guard activePID == targetApplication.processIdentifier || activePID == ProcessInfo.processInfo.processIdentifier else { return false }
+        }
+        guard copyToClipboard(content) else { return false }
+        _ = await prepareAndSimulatePaste(into: targetApplication)
         return true
     }
 
@@ -65,19 +61,22 @@ class PasteController {
         return true
     }
 
-    private static func prepareAndSimulatePaste(into targetApplication: NSRunningApplication?) {
-        if let targetApplication,
-           !targetApplication.isTerminated,
-           targetApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-            targetApplication.activate(options: [.activateIgnoringOtherApps])
+    private static func prepareAndSimulatePaste(into targetApplication: NSRunningApplication?) async -> Bool {
+        guard let targetApplication,
+              !targetApplication.isTerminated,
+              targetApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
+        targetApplication.activate(options: [.activateIgnoringOtherApps])
+        do {
+            try await Task.sleep(nanoseconds: UInt64(pasteDelay * 1_000_000_000))
+            try Task.checkCancellation()
+        } catch {
+            return false
         }
-
-        // Give the pasteboard and target app a brief moment to settle before posting Cmd+V.
-        DispatchQueue.main.asyncAfter(deadline: .now() + pasteDelay) {
-            simulatePaste()
-        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetApplication.processIdentifier else { return false }
+        simulatePaste()
+        return true
     }
-    
+
     /// Simulate Command + V keystroke
     private static func simulatePaste() {
         let source = CGEventSource(stateID: .hidSystemState)
